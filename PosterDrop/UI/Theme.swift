@@ -35,6 +35,24 @@ enum Theme {
     }
 }
 
+// MARK: - 设备文案
+
+enum DeviceLabel {
+    /// 用于「文件 › 我的 iPhone / iPad › PosterDrop」这类系统路径提示。
+    static var deviceName: String {
+        UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+    }
+
+    static var isPad: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    /// 配对入口的图标，iPad 上不用 iPhone 造型。
+    static var pairingSymbol: String {
+        isPad ? "ipad.and.arrow.forward" : "iphone.and.arrow.forward"
+    }
+}
+
 // MARK: - 卡片
 
 struct CardBackground: ViewModifier {
@@ -75,6 +93,36 @@ struct ScreenBackground: View {
         }
         .ignoresSafeArea()
     }
+}
+
+// MARK: - 大屏版心
+
+/// 把整页内容收进一条可读宽度内并居中。
+///
+/// iPhone 上不生效（屏幕本来就窄）；iPad 竖屏、横屏、分屏、Stage Manager
+/// 任意窗口宽度下都不会把卡片拉成一条超长的横条。
+struct ReadableColumn: ViewModifier {
+    var maxWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: maxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+    }
+}
+
+extension View {
+    /// - Parameter maxWidth: 版心最大宽度，默认 760pt（iPad 竖屏正好双列卡片）。
+    func readableColumn(_ maxWidth: CGFloat = 760) -> some View {
+        modifier(ReadableColumn(maxWidth: maxWidth))
+    }
+}
+
+/// 壁纸列表列数：宽屏自动双列，窄屏（iPhone / iPad 窄分屏）自动单列。
+enum GalleryLayout {
+    static let columns: [GridItem] = [
+        GridItem(.adaptive(minimum: 340, maximum: .infinity), spacing: 12, alignment: .top)
+    ]
 }
 
 // MARK: - 横幅

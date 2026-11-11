@@ -1,11 +1,12 @@
 # PosterDrop
 
-把 **PosterBoard 动态壁纸包（`.tendies`）** 导入手机并直接「装进系统」，无需越狱、无需电脑中转。
+把 **PosterBoard 动态壁纸包（`.tendies`）** 导入设备并直接「装进系统」，无需越狱、无需电脑中转。
 
 PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → 立刻可用**。
 
-- 全部操作在 iPhone 本地完成：配对隧道（Airlift/AirTraffic）或直连通道（container 沙箱扩展），二选一
-- 支持 iOS 18.0 – 27.2 beta 2（隧道）/ 26.0 – 27.2（直连，需签名带 App Groups），详见[兼容性](#一兼容性)
+- 全部操作在 iPhone / iPad 本地完成：配对隧道（Airlift/AirTraffic）或直连通道（container 沙箱扩展），二选一
+- 通用 App（`TARGETED_DEVICE_FAMILY = 1,2`）：同一份 IPA 装 iPhone 和 iPad，iPad 支持四方向、分屏、台前调度与拖放导入
+- 支持 iOS / iPadOS 18.0 – 27.2 beta 2（隧道）/ 26.0 – 27.2（直连，需签名带 App Groups），详见[兼容性](#一兼容性)
 - 支持 `.tendies` / `.zip` / 整容器归档，自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
 - 自动抽取预览图、判定描述符数量、双写 iOS 18+ 的新容器
 - 内置配对管理、容器探测、缓存刷新、NeoSpring respring、运行日志
@@ -20,10 +21,18 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 
 | 项目 | 要求 |
 | --- | --- |
-| 系统 | **iOS 18.0 及以上**（部署目标 `IPHONEOS_DEPLOYMENT_TARGET = 18.0`） |
-| 机型 | **iPhone**（`TARGETED_DEVICE_FAMILY = 1`，未适配 iPad） |
+| 系统 | **iOS / iPadOS 18.0 及以上**（部署目标 `IPHONEOS_DEPLOYMENT_TARGET = 18.0`） |
+| 机型 | **iPhone + iPad**（`TARGETED_DEVICE_FAMILY = 1,2`），iPad 支持四方向、分屏、台前调度 |
 | 架构 | arm64（AirliftFFI 只带 arm64 切片，模拟器仅 arm64） |
 | 安装 | 未签名 IPA，需 SideStore / AltStore / Sideloadly / TrollStore 自签 |
+
+**iPad 适配说明**
+
+- iPhone 与 iPad 共用同一个 bundle、同一份 IPA，签名流程完全一致（iPad 也需要在重签工具里勾上 App Groups）。
+- 界面：iPad 全宽时页签变成侧边栏；内容限制在 760pt 版心内居中，壁纸列表按窗口宽度自动单列 / 双列。
+- 窗口：`UIRequiresFullScreen` 已移除，可在分屏、Slide Over、台前调度里任意缩放；窄窗口自动退回底部标签栏和单列布局。
+- 导入：除「导入壁纸」外，iPad 上可直接从“文件”App 把 `.tendies` 拖进壁纸页。
+- 注入：隧道 / 直连两条通道与 iPhone 共用同一套代码，能否使用只取决于 **iPadOS 版本**（见 1.2），与机型无关。直连通道的公开实测记录都来自 iPhone，iPad 尚未单独验证，建议先跑「诊断 › 自检通道」。
 
 ### 1.2 两条通道 × 系统版本
 
@@ -270,7 +279,7 @@ xcodegen generate
 2. **配对**：
    - iOS 27+：配对页 → 开始本机配对 → 记下 6 位 PIN → 设置 › 隐私与安全性 › 开发者模式 › 与 PosterDrop 配对 → 输入 PIN；
    - iOS 18–26：配对页 → 导入配对文件（SideStore 的 `ALTPairingFile.mobiledevicepairing` 等）。
-3. **导入壁纸**：壁纸页 → 导入壁纸（或把 `.tendies` 放进「文件 › 我的 iPhone › PosterDrop」，再点「扫描文档」）。
+3. **导入壁纸**：壁纸页 → 导入壁纸（或把 `.tendies` 放进「文件 › 我的 iPhone / iPad › PosterDrop」，再点「扫描文档」；iPad 也可直接从“文件”拖进壁纸页）。
 4. **应用**：勾选 → 应用所选（或单张长按/详情页应用）。注入完成后自动 respring。
 5. **选用**：锁屏长按 → 自定义 → 墙纸，或「设置 › 墙纸」里选择新出现的壁纸。
 
@@ -296,6 +305,10 @@ A：可以，导入和预览完全不碰系统；只有点「应用」才会写 
 A：分通道看。**配对隧道**在 iOS 27.2 beta 3 起被 Apple 修复（AirTraffic 同步链路），升级即失效且不可逆；
 **直连通道**走的是另一处 container 签发缺陷，worse_query 标注支持到 27.2（含 beta 3），升级后大概率仍可用。
 这也是 1.1.0 之后把直连做成独立通道的原因：一条被补了还有另一条。
+
+**Q：iPad 上能用吗？界面是放大版 iPhone 吗？**
+A：能，同一份 IPA。界面是原生 iPad 布局：宽窗口下页签变侧边栏、壁纸列表双列、内容按 760pt 版心居中，
+并支持分屏 / 台前调度 / 从“文件”拖入壁纸包。功能上唯一的区别是 iPad 需要 iPadOS 18+，且直连通道还没有 iPad 实测记录。
 
 ---
 

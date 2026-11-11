@@ -10,9 +10,30 @@ import SwiftUI
 struct RootView: View {
 
     @EnvironmentObject private var model: AppModel
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var selection: Int = 0
 
     var body: some View {
+        Group {
+            if sizeClass == .regular {
+                // iPad 全屏 / 宽分屏：侧边栏，横屏时不用在顶部横条和内容之间来回挪眼。
+                tabs
+                    .tabViewStyle(.sidebarAdaptable)
+            } else {
+                // iPhone、iPad 窄分屏、Slide Over：标准底部标签栏。
+                tabs
+            }
+        }
+        .tint(Theme.accent)
+        .overlay {
+            if model.isRespringing {
+                RespringOverlay()
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    private var tabs: some View {
         TabView(selection: $selection) {
             LibraryView()
                 .tabItem {
@@ -31,13 +52,6 @@ struct RootView: View {
                     Label("诊断", systemImage: "wrench.and.screwdriver")
                 }
                 .tag(2)
-        }
-        .tint(Theme.accent)
-        .overlay {
-            if model.isRespringing {
-                RespringOverlay()
-                    .transition(.opacity)
-            }
         }
     }
 }

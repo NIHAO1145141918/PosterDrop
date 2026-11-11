@@ -54,6 +54,7 @@ struct PairingView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
                     .padding(.bottom, 24)
+                    .readableColumn()
                 }
             }
             .navigationTitle("配对")
@@ -158,7 +159,7 @@ struct PairingView: View {
     private var onDeviceCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Image(systemName: "iphone.and.arrow.forward")
+                Image(systemName: DeviceLabel.pairingSymbol)
                     .foregroundStyle(Theme.accentGradient)
                 Text("本机配对（iOS 27 及以上）")
                     .font(.subheadline.weight(.semibold))
@@ -226,7 +227,7 @@ struct PairingView: View {
             Text("导入配对文件")
                 .font(.subheadline.weight(.semibold))
 
-            Text("支持 .mobiledevicepairing / .mobilepair / 从电脑导出的 plist。也可以直接把文件放进「文件 › 我的 iPhone › PosterDrop」。")
+            Text("支持 .mobiledevicepairing / .mobilepair / 从电脑导出的 plist。也可以直接把文件放进「文件 › 我的 \(DeviceLabel.deviceName) › PosterDrop」。")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -299,7 +300,7 @@ struct PairingView: View {
             Text("配对方式对照")
                 .font(.subheadline.weight(.semibold))
 
-            guideRow(title: "SideStore", detail: "设置 › 配对 › 导入「文件 › 我的 iPhone › SideStore › ALTPairingFile.mobiledevicepairing」")
+            guideRow(title: "SideStore", detail: "设置 › 配对 › 导入「文件 › 我的 \(DeviceLabel.deviceName) › SideStore › ALTPairingFile.mobiledevicepairing」")
             guideRow(title: "LiveContainer", detail: "在 LiveContainer 的 SideStore 容器 Documents 里找到同名文件再导入")
             guideRow(title: "电脑导出", detail: "jitterbugpair / pymobiledevice3 生成配对文件后 AirDrop 到手机")
             guideRow(title: "本机配对", detail: "iOS 27+：点上面的「开始本机配对」，到设置里输入 PIN")

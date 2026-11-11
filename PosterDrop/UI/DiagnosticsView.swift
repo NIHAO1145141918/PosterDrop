@@ -38,6 +38,7 @@ struct DiagnosticsView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
                     .padding(.bottom, 24)
+                    .readableColumn(820)
                 }
             }
             .navigationTitle("诊断")
@@ -325,7 +326,7 @@ struct DiagnosticsView: View {
             }
 
             LogConsoleView(lines: logBus.lines)
-                .frame(height: 220)
+                .frame(height: DeviceLabel.isPad ? 320 : 220)
         }
         .card()
     }
@@ -338,7 +339,8 @@ struct DiagnosticsView: View {
                 .font(.subheadline.weight(.semibold))
 
             InfoRow(title: "版本", value: appVersion)
-            InfoRow(title: "适配", value: "iOS 18.0 – 27.2（分通道）")
+            InfoRow(title: "适配", value: DeviceLabel.isPad ? "iPadOS 18.0 – 27.2（分通道）" : "iOS 18.0 – 27.2（分通道）")
+            InfoRow(title: "设备", value: DeviceLabel.isPad ? "iPad · 支持分屏与台前调度" : "iPhone")
             InfoRow(title: "底层", value: "Airlift (AirTraffic)", monospaced: true)
 
             Text("本工具只做壁纸包的导入与注入，不修改系统 App 的身份或账户信息。写入系统目录属于非官方能力，Apple 可能随时在系统更新中修复：配对隧道自 27.2 beta 3 起已失效，直连通道（container 签发缺陷）仍可用。")

@@ -15,6 +15,7 @@ struct LibraryView: View {
 
     @State private var showImporter = false
     @State private var detailItem: WallpaperItem?
+    @State private var isDropTargeted = false
 
     private var importTypes: [UTType] {
         var types: [UTType] = []
@@ -61,6 +62,7 @@ struct LibraryView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
                     .padding(.bottom, 24)
+                    .readableColumn()
                 }
             }
             .navigationTitle("壁纸库")
@@ -101,6 +103,20 @@ struct LibraryView: View {
             .sheet(item: $detailItem) { item in
                 WallpaperDetailView(item: item)
                     .environmentObject(model)
+            }
+            .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+                handleDrop(providers)
+            }
+            .overlay {
+                if isDropTargeted {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .strokeBorder(
+                            Theme.accent,
+                            style: StrokeStyle(lineWidth: 2, dash: [9, 7])
+                        )
+                        .padding(8)
+                        .allowsHitTesting(false)
+                }
             }
             .onDisappear {
                 model.persistSelection()
@@ -180,13 +196,15 @@ struct LibraryView: View {
             }
             .padding(.horizontal, 4)
 
-            ForEach($model.items) { $item in
-                WallpaperRow(
-                    item: $item,
-                    onOpen: { detailItem = item },
-                    onApply: { Task { await model.apply(items: [item]) } },
-                    onDelete: { model.delete(item) }
-                )
+            LazyVGrid(columns: GalleryLayout.columns, spacing: 12) {
+                ForEach($model.items) { $item in
+                    WallpaperRow(
+                        item: $item,
+                        onOpen: { detailItem = item },
+                        onApply: { Task { await model.apply(items: [item]) } },
+                        onDelete: { model.delete(item) }
+                    )
+                }
             }
         }
     }
@@ -207,7 +225,9 @@ struct LibraryView: View {
             Text("还没有壁纸")
                 .font(.headline)
 
-            Text("点「导入壁纸」从“文件”里选择 .tendies 包，\n或把文件拖进「文件 › 我的 iPhone › PosterDrop」。")
+            Text(DeviceLabel.isPad
+                 ? "点「导入壁纸」从“文件”里选择 .tendies 包，\n或直接把文件从“文件”App 拖进本页。"
+                 : "点「导入壁纸」从“文件”里选择 .tendies 包，\n或把文件拖进「文件 › 我的 iPhone › PosterDrop」。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -278,8 +298,63 @@ struct LibraryView: View {
             .padding(.horizontal, 16)
             .padding(.top, 10)
             .padding(.bottom, 8)
+            .readableColumn()
         }
         .background(.ultraThinMaterial)
+    }
+
+    // MARK: - 拖放导入（iPad 多任务）
+
+    /// iPad 分屏 / 台前调度下，直接把“文件”里的壁纸包拖进来。
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        let collector = URLCollector()
+        let group = DispatchGroup()
+        var accepted = false
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            accepted = true
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                if let data = item as? Data,
+                   let url = URL(dataRepresentation: data, relativeTo: nil) {
+                    collector.append(url)
+                } else if let url = item as? URL {
+                    collector.append(url)
+                }
+            }
+        }
+
+        guard accepted else { return false }
+
+        group.notify(queue: .main) {
+            let urls = collector.urls
+            guard !urls.isEmpty else {
+                model.banner = .error("没有识别到可导入的文件，请拖入 .tendies 或 .zip 壁纸包。")
+                return
+            }
+            Task { await model.importURLs(urls) }
+        }
+        return true
+    }
+}
+
+/// 拖放回调在任意线程返回，这里串行收集 URL。
+private final class URLCollector: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var storage: [URL] = []
+
+    func append(_ url: URL) {
+        lock.lock()
+        storage.append(url)
+        lock.unlock()
+    }
+
+    var urls: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
 
@@ -441,6 +516,7 @@ struct WallpaperDetailView: View {
                         }
                     }
                     .padding(16)
+                    .readableColumn(640)
                 }
             }
             .navigationTitle(item.name)

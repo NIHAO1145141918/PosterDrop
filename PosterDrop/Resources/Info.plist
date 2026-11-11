@@ -33,11 +33,17 @@
 	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
-	<key>UIRequiresFullScreen</key>
-	<true/>
+	<!-- iPhone 只走竖屏；iPad 四方向都支持，才能随分屏 / Stage Manager 自由缩放 -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UIStatusBarStyle</key>
 	<string>UIStatusBarStyleDefault</string>
