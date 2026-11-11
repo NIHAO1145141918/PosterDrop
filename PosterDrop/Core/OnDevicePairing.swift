@@ -192,6 +192,7 @@ final class OnDevicePairing: NSObject, ObservableObject {
         stopAdvertising()
         let service = NetService(domain: "", type: "_remotepairing-pairable-host._tcp.", name: serviceID, port: port)
         _ = service.setTXTRecord(NetService.data(fromTXTRecord: txt))
+        service.delegate = self
         service.publish()
         netService = service
         status = "正在广播配对服务…"
@@ -252,5 +253,20 @@ private let pairingPinCallback: ALPairPinCb = { pinPointer, context in
 
     DispatchQueue.main.async {
         controller.presentPin(value)
+    }
+}
+
+// MARK: - Bonjour 状态反馈
+
+extension OnDevicePairing: NetServiceDelegate {
+
+    func netServiceDidPublish(_ sender: NetService) {
+        status = "配对服务已发布，请到「设置 › 隐私与安全性 › 开发者模式 › 与 PosterDrop 配对」"
+    }
+
+    func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+        let code = errorDict[NetService.errorCode]?.intValue ?? -1
+        lastError = "Bonjour 广播失败（\(code)）"
+        status = "配对服务广播失败，请检查「设置 › PosterDrop › 本地网络」后重试"
     }
 }

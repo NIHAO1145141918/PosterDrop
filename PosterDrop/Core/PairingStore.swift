@@ -75,9 +75,19 @@ final class PairingStore {
             throw AirliftError.failed("配对文件内容为空，请重新导出或重新配对。")
         }
 
-        // 必须是 plist，否则一定不是配对记录
-        guard (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) != nil else {
+        // 必须是 plist，且包含配对记录的特征字段，避免误把普通 plist 当配对文件
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dictionary = plist as? [String: Any] else {
             throw AirliftError.failed("这不是有效的配对 plist 文件。")
+        }
+
+        let signatureKeys = [
+            "HostID", "SystemBUID", "RootCertificate", "HostCertificate",
+            "DeviceCertificate", "HostPrivateKey", "RootPrivateKey"
+        ]
+        let matched = signatureKeys.filter { dictionary[$0] != nil }
+        guard !matched.isEmpty else {
+            throw AirliftError.failed("这个 plist 不像设备配对记录（缺少 HostID / SystemBUID / 证书字段）。")
         }
 
         try data.write(to: Self.canonicalURL, options: .atomic)
@@ -120,6 +130,8 @@ final class PairingStore {
                 let name = item.lastPathComponent.lowercased()
                 let isKnownName = knownNames.contains(name)
                 guard knownExtensions.contains(extensionName) || isKnownName else { continue }
+                // .plist 太宽泛，只有在文件名带 pair / 是已知文件名时才当作候选
+                if extensionName == "plist" && !name.contains("pair") && !isKnownName { continue }
 
                 let size = Self.fileSize(at: item)
                 guard size > 0 else { continue }
