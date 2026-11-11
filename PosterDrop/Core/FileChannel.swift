@@ -110,6 +110,7 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
             lines.append("❌ 申请扩展失败：\(error.localizedDescription)")
             return lines.joined(separator: "\n")
         }
+        defer { withExtendedLifetime(rootSession) {} }
         lines.append("✅ 已获得 \(applicationsRoot) 的沙箱扩展")
 
         guard let children = try? fileManager.contentsOfDirectory(atPath: applicationsRoot) else {

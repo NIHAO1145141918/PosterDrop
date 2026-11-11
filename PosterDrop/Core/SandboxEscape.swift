@@ -119,8 +119,10 @@ enum SandboxEscape {
         // 符号链接必须放在自己的 Caches 上，且目录本身要先消失
         let caches = base + "/Library/Caches"
         try? fileManager.removeItem(atPath: caches)
-        guard fileManager.createSymbolicLink(atPath: caches, withDestinationPath: target) else {
-            throw Failure(code: -4, message: "无法在 \(caches) 创建符号链接")
+        do {
+            try fileManager.createSymbolicLink(atPath: caches, withDestinationPath: target)
+        } catch {
+            throw Failure(code: -4, message: "无法在 \(caches) 创建符号链接：\(error.localizedDescription)")
         }
         defer {
             try? fileManager.removeItem(atPath: caches)
