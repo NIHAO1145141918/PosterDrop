@@ -338,10 +338,10 @@ struct DiagnosticsView: View {
                 .font(.subheadline.weight(.semibold))
 
             InfoRow(title: "版本", value: appVersion)
-            InfoRow(title: "适配", value: "iOS 18.0 – 27.2 beta 2")
+            InfoRow(title: "适配", value: "iOS 18.0 – 27.2（分通道）")
             InfoRow(title: "底层", value: "Airlift (AirTraffic)", monospaced: true)
 
-            Text("本工具只做壁纸包的导入与注入，不修改系统 App 的身份或账户信息。写入系统目录属于非官方能力，Apple 可能随时在系统更新中修复；升级到 27.2 beta 3 及以后版本将失效。")
+            Text("本工具只做壁纸包的导入与注入，不修改系统 App 的身份或账户信息。写入系统目录属于非官方能力，Apple 可能随时在系统更新中修复：配对隧道自 27.2 beta 3 起已失效，直连通道（container 签发缺陷）仍可用。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
