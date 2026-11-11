@@ -134,13 +134,9 @@ enum ContainerLocator {
     /// 这些路径是固定的，不需要先知道任何 UUID；文件名变了也能扫到。
     private static let mapDirectories = [
         "/var/mobile/Library/MobileInstallation",
+        "/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobileinstallation",
+        "/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobileinstallation/Library",
         "/var/mobile/Library/Caches"
-    ]
-
-    private static let preferredMapFiles = [
-        "LastLaunchServicesMap.plist",
-        "com.apple.mobile.installation.plist",
-        "com.apple.mobile_installation.plist"
     ]
 
     private static func mobileInstallationCandidates(group: String, log: (String) -> Void) -> [String] {
@@ -154,20 +150,9 @@ enum ContainerLocator {
             }
 
             let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
-            var files = Set(preferredMapFiles.filter { names.contains($0) })
+            let files = candidateMapFiles(in: names, isCacheDirectory: directory.hasSuffix("/Caches"))
 
-            // 系统改名时兜底：挑名字像安装/启动服务数据库的 plist 再试几个
-            let extra = names.filter { name in
-                let lower = name.lowercased()
-                guard lower.hasSuffix(".plist"), !files.contains(name) else { return false }
-                return lower.contains("launchservices")
-                    || lower.contains("installation")
-                    || lower.contains("appinfo")
-                    || lower.contains("container")
-            }
-            files.formUnion(extra.prefix(6))
-
-            for file in files.sorted() {
+            for file in files {
                 let path = directory + "/" + file
                 guard scanned.insert(path).inserted else { continue }
 
@@ -186,6 +171,23 @@ enum ContainerLocator {
             }
         }
         return results
+    }
+
+    /// MobileInstallation 目录里文件不多，全部试；Caches 目录上千个，按名字筛。
+    private static func candidateMapFiles(in names: [String], isCacheDirectory: Bool) -> [String] {
+        if isCacheDirectory {
+            let filtered = names.filter { name in
+                let lower = name.lowercased()
+                guard lower.hasSuffix(".plist") else { return false }
+                return lower.contains("launchservices")
+                    || lower.contains("installation")
+                    || lower.contains("appinfo")
+                    || lower.contains("container")
+            }
+            return filtered.sorted().prefix(8).map { $0 }
+        }
+        let plists = names.filter { $0.lowercased().hasSuffix(".plist") }.sorted()
+        return plists.prefix(12).map { $0 }
     }
 
     /// 在任意结构的 plist 里递归找 bundleID 对应的容器路径。
@@ -368,7 +370,8 @@ enum ContainerLocator {
             results.append(Entry(path: url.path, identifier: identifier))
         }
 
-        if let list = send(workspace, "allInstalledApplications") as? [AnyObject] {
+        for listSelector in ["allApplications", "allInstalledApplications"] {
+            guard let list = send(workspace, listSelector) as? [AnyObject] else { continue }
             for app in list {
                 append(app)
                 if let plugins = send(app, "plugInKitPlugins") as? [AnyObject] {
