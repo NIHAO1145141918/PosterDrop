@@ -102,6 +102,9 @@ struct LibraryView: View {
                 WallpaperDetailView(item: item)
                     .environmentObject(model)
             }
+            .onDisappear {
+                model.persistSelection()
+            }
         }
     }
 
@@ -400,6 +403,9 @@ struct WallpaperDetailView: View {
                             InfoRow(title: "描述符数量", value: "\(item.descriptorCount)")
                             InfoRow(title: "文件大小", value: item.formattedSize)
                             InfoRow(title: "格式", value: item.isContainerArchive ? "整容器归档" : "描述符归档")
+                            if item.detectedExtensions.count > 1 {
+                                InfoRow(title: "涉及扩展", value: item.detectedExtensions.joined(separator: "\n"), monospaced: true)
+                            }
                             if item.containsSQLiteStore {
                                 InfoRow(title: "提示", value: "包含 SQLite 数据库，建议只取其中的 descriptor 目录")
                             }

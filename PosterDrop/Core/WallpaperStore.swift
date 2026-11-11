@@ -58,7 +58,13 @@ final class WallpaperStore {
         let destination = Self.directory.appendingPathComponent(fileName)
         try await Self.copyFile(from: sourceURL, to: destination)
 
-        let parsed = try await ArchiveInspector.inspect(archive: destination)
+        let parsed: ParsedWallpaper
+        do {
+            parsed = try await ArchiveInspector.inspect(archive: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
 
         let attributes = try? FileManager.default.attributesOfItem(atPath: destination.path)
         let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0

@@ -33,6 +33,7 @@ targets:
         link: true
     settings:
       base:
+        TARGETED_DEVICE_FAMILY: "1"
         PRODUCT_NAME: PosterDrop
         PRODUCT_BUNDLE_IDENTIFIER: com.posterdrop.app
         INFOPLIST_FILE: PosterDrop/Resources/Info.plist

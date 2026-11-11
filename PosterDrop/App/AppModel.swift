@@ -131,6 +131,11 @@ final class AppModel: ObservableObject {
         store.saveLibrary(items)
     }
 
+    /// 保存勾选状态（用户逐个勾选时不会立即写盘，切走页面时补写）
+    func persistSelection() {
+        store.saveLibrary(items)
+    }
+
     func toggleSelectAll() {
         let allSelected = !items.isEmpty && items.allSatisfy { $0.isSelected }
         for index in items.indices {
@@ -241,6 +246,8 @@ final class AppModel: ObservableObject {
             banner = .error("配对文件不存在，请重新导入。")
             return
         }
+
+        persistLibrary()
 
         isWorking = true
         progress = 0
@@ -376,7 +383,7 @@ final class AppModel: ObservableObject {
             return
         }
 
-        var container = containerPath
+        let container = containerPath
         if container.isEmpty {
             banner = .error("请先在“诊断”里探测一次容器路径。")
             return
