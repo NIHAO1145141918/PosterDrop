@@ -5,7 +5,7 @@
 PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → 立刻可用**。
 
 - 全部操作在 iPhone 本地完成：配对隧道（Airlift/AirTraffic）或直连通道（container 沙箱扩展），二选一
-- 支持 iOS 18.0 – 27.2 beta 2（隧道）/ 26.0 – 27.2（直连），详见[兼容性](#一兼容性)
+- 支持 iOS 18.0 – 27.2 beta 2（隧道）/ 26.0 – 27.2（直连，需签名带 App Groups），详见[兼容性](#一兼容性)
 - 支持 `.tendies` / `.zip` / 整容器归档，自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
 - 自动抽取预览图、判定描述符数量、双写 iOS 18+ 的新容器
 - 内置配对管理、容器探测、缓存刷新、NeoSpring respring、运行日志
@@ -29,22 +29,20 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 
 两条通道互相独立：**任意一条可用就能完成注入**。默认走配对隧道，直连通道需在「诊断 › 直连通道」手动开启。
 
-| iOS 版本 | 配对隧道（Airlift / AirTraffic） | 直连通道（container 沙箱扩展） |
+| iOS 版本 | 配对隧道（Airlift / AirTraffic） | 直连通道（App Group 沙箱扩展） |
 | --- | --- | --- |
 | 17.x 及更早 | ❌ 低于部署目标 | ❌ 低于部署目标 |
-| 18.0 – 18.x | ✅ | ❌ 签发缺陷不存在 |
-| 19 – 25.x | ✅ | ❌ 签发缺陷不存在 |
-| 26.0 – 26.6.1 | ✅ | ✅（App Group 查询需备用 flags，已内置） |
-| 26.7 – 26.7.2 | ✅ | ✅ |
-| 26.7.3 及以后 / 26.8 | ⚠️ 未验证 | ⚠️ 未验证 |
-| 27.0 – 27.2 beta 2 | ✅ | ✅ |
-| **27.2 beta 3 – 27.2** | ❌ **AirTraffic 已被修补** | ✅ 仍可用：worse_query 明确标注覆盖到 27.2 |
+| 18.0 – 25.x | ✅ | ❌ 没有这条签发缺陷，只能用隧道 |
+| 26.0 – 26.6.1 | ✅ | ✅（App Group 查询用备用 flags） |
+| 26.7 – 26.7.2 | ✅ | ✅（WQFiles 实测 26.7.1） |
+| 27.0 – 27.2 beta 2 | ✅ | ✅（WQFiles 实测 27.0.1、27.2） |
+| **27.2 beta 3 – 27.2** | ❌ **AirTraffic 已被修补** | ✅ 仍可用，走的是另一处缺陷 |
 | 27.3 及以后 | ⚠️ 未验证 | ⚠️ 未验证 |
 
-> 「✅」= 有公开实现或本文档对应的代码路径；「⚠️」= 没有设备验证，请先跑自检；「❌」= 明确不可用。
+> 「✅」= 有公开实现或实测记录；「⚠️」= 没有设备验证，请先跑自检；「❌」= 明确不可用。
 >
 > 两处补丁要分开看：**AirTraffic 同步链路**在 27.2 beta 3 被 Apple 修掉（AirCard-iOS 的 README 有记录），
-> 影响的是配对隧道；**container 签发缺陷**是另一条路，worse_query 的作者标注支持到 **27.2**（含 beta 3），
+> 影响的是配对隧道；**container 签发缺陷**是另一条路（[WQFiles](https://github.com/kolbicz/WQFiles) 在 27.2 上实测可用），
 > 所以这一版升级后隧道报废、直连仍可用。
 
 ### 1.3 各通道前置条件
@@ -59,22 +57,42 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 
 1. 不需要配对记录，不需要 VPN；
 2. 需要系统仍存在 container 签发缺陷（见 1.2 表）；
-3. 默认用 App 自身容器当跳板，不需要任何特殊 entitlement；
-   若填 `group.*` 走 App Group，则签名 profile 必须带 App Groups 能力（免费 Apple ID 不具备）；
+3. **签名里必须带 `com.apple.security.application-groups`**。这条是硬要求，不是可选项：
+   containermanagerd 只对 App Group 容器返回查询结果，自身容器（class 2）拿不到 token。
+   - 用 **轻松签 / ESign** 重签时勾选 App Groups，填任意一个 profile 允许的 group（如 `group.com.posterdrop.app`）；
+   - **Sideloadly 不会加 App Groups**，直连会直接报「签名里没有可用的 App Group」；
+   - 免费 Personal Team 在 Xcode 27 上通常也能签出 App Groups（[filza-wq](https://github.com/MchinaMd57764/filza-wq) 实测），但会随证书 7 天过期；
+   - 应用会自动读签名里的 group，不需要手填；填了则以手填的为准。
 4. 设备已解锁。
 
-### 1.4 怎么确认自己这台能用
+### 1.4 容器是怎么找到的
+
+这里有个反直觉的点：**拿到扩展也列不出 `Data/Application` 父目录**——token 是按具体容器签发的，父目录本身不是容器。
+所以不能靠遍历找 PosterBoard，程序按四级顺序定位（日志里会逐条打印）：
+
+| 顺序 | 方法 | 说明 |
+| --- | --- | --- |
+| ① | 手动路径 | 诊断页里粘贴容器路径（WQFiles 的 App Data 里能看到 `com.apple.PosterBoard`） |
+| ② | containermanagerd 枚举 | 遍历 class 1–14，用 `container_object_get_identifier` 匹配 |
+| ③ | LaunchServices | `LSApplicationWorkspace` 取 `dataContainerURL` |
+| ④ | 按 bundle id 查询 | `container_query_set_identifiers(class 2)`，多数系统会拒绝 |
+
+命中后还会验证 `<容器>/Library/Application Support/PRBPosterExtensionDataStore` 是否真实存在，只有这一步通过才算可用。
+
+### 1.5 怎么确认自己这台能用
 
 打开「诊断 › 直连通道 › 自检通道」，输出含义：
 
 | 输出 | 含义 |
 | --- | --- |
-| `✅ 已获得 /var/mobile/Containers/Data/Application 的沙箱扩展` | 签发缺陷存在，直连可用 |
-| `✅ PosterBoard 容器：/var/mobile/...` | 已定位到目标容器，可以直接应用壁纸 |
+| `签名内 App Groups：group.xxx` | 签名带 App Groups，这是直连的前提 |
+| `签名内 App Groups：无` | 重签时没勾 App Groups，直连一定失败，换签名工具 |
+| `✅ 已获得 …/PRBPosterExtensionDataStore` | 扩展生效，容器正确，可以直接应用壁纸 |
+| `⚠️ 容器可读，但没有 PRBPosterExtensionDataStore` | 找错容器，或系统版本布局不同，请手动填路径 |
 | `❌ 申请扩展失败：…（代码 -5）` | containermanagerd 拒绝查询，多为系统已修补或 flags 不匹配 |
 | `❌ 申请扩展失败：…（代码 -6）` | 内核拒绝签发扩展，同上 |
-| `❌ 申请扩展失败：…（代码 -1）` | App Group 容器不存在（没填或没有该 entitlement） |
-| `❌ 在 N 个容器里没有找到 PosterBoard` | 扩展拿到了但看不到目标，通常是数据保护锁着（解锁后重试） |
+| `❌ 申请扩展失败：…（代码 -8）` | 签发成功但目标打不开，通常是系统已修补 |
+| `❌ 签名里没有可用的 App Group` | 签名缺 App Groups entitlement |
 
 隧道是否可用，看「配对」页的隧道状态与日志里的 RSD 握手结果。
 
@@ -121,11 +139,11 @@ PosterDrop 做四件事：
 | 通道 | 前提 | 适用系统 | 说明 |
 | --- | --- | --- | --- |
 | **配对隧道**（默认） | 有配对记录 + LocalDevVPN（`10.7.0.1`） | iOS 18.0 – 27.2 beta 2 | 走 AirTraffic/RSD，写的是 PosterBoard 真实容器 |
-| **直连**（实验） | 无需配对，无需 VPN | iOS 26.0 – 26.7.2 / 27.2 | 向 containermanagerd 申请沙箱扩展后直接写容器 |
+| **直连**（实验） | 签名带 App Groups；无需配对、无需 VPN | iOS 26.0 – 27.2 | 借 App Group 容器申请沙箱扩展后直接写容器 |
 
 直连通道复现的是 [worse_query](https://github.com/forcequitOS/worse_query) 描述的那类缺陷：
 
-1. 把自己（或自己 App Group）的 `Library/Caches` 换成指向目标的符号链接；
+1. 把**自己 App Group** 的 `Library/Caches` 换成指向目标的符号链接（自身容器不行，必须 class 7）；
 2. 以 `class=app/appGroup`、`part=3 (Library/Caches)` 发起 `container_query`；
 3. 守护进程按 part 拼路径签发 sandbox extension 时**没有对符号链接做 realpath 校验**，于是扩展实际覆盖链接指向的目录；
 4. `sandbox_extension_consume` 之后，本进程就拿到了 `Data/Application/*` 的读写权；
