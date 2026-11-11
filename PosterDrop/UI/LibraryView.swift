@@ -150,10 +150,14 @@ struct LibraryView: View {
             }
 
             HStack(spacing: 6) {
-                Image(systemName: model.hasPairing ? "checkmark.seal.fill" : "exclamationmark.seal")
+                Image(systemName: model.directEnabled
+                      ? "bolt.horizontal.circle.fill"
+                      : (model.hasPairing ? "checkmark.seal.fill" : "exclamationmark.seal"))
                     .font(.caption)
-                    .foregroundColor(model.hasPairing ? .green : .orange)
-                Text(model.hasPairing ? "配对记录已就绪" : "还没有配对记录，应用前请先完成配对")
+                    .foregroundColor(model.directEnabled ? Theme.accent : (model.hasPairing ? .green : .orange))
+                Text(model.directEnabled
+                     ? "直连通道已启用，无需配对"
+                     : (model.hasPairing ? "配对记录已就绪" : "还没有配对记录，应用前请先完成配对"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

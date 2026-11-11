@@ -29,6 +29,7 @@ struct DiagnosticsView: View {
                         }
 
                         containerCard
+                        directCard
                         optionsCard
                         actionsCard
                         logCard
@@ -103,6 +104,78 @@ struct DiagnosticsView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        .card()
+    }
+
+    // MARK: - 直连通道
+
+    private var directCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("直连通道（实验）")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(model.directEnabled ? "已启用" : "默认关闭")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(model.directEnabled ? Theme.accent : .secondary)
+            }
+
+            Text("不经过配对隧道，在 App 内直接向 PosterBoard 容器申请沙箱扩展后写入。依赖 containermanagerd 的符号链接签发缺陷，仅 iOS 26.0–26.7.2 / 27.2 有效。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle(isOn: $model.directEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("应用壁纸时使用直连通道")
+                        .font(.footnote.weight(.medium))
+                    Text("不再需要配对记录与 LocalDevVPN；失败时可随时关掉回退到隧道")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .tint(Theme.accent)
+
+            TextField("App Group（可留空）", text: $model.appGroupID)
+                .font(.system(size: 12, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
+
+            Text("留空表示用 App 自身的数据容器当跳板，不需要任何特殊 entitlement；填入 group.* 则走 App Group（需要签名 profile 带 App Groups 能力）。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                Task { await model.probeDirectChannel() }
+            } label: {
+                Label("自检通道", systemImage: "waveform.path.ecg")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 42)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accent)
+            .disabled(model.isWorking)
+
+            if !model.directStatus.isEmpty {
+                Text(model.directStatus)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.primary.opacity(0.05))
+                    )
+            }
         }
         .card()
     }

@@ -55,7 +55,7 @@ final class PosterBoardInstaller {
     func install(
         items: [WallpaperItem],
         containerPath: String,
-        pairingPath: String,
+        channel: FileChannel,
         options: InstallOptions,
         log: @escaping (String) -> Void,
         progress: @escaping (Double) -> Void
@@ -72,6 +72,7 @@ final class PosterBoardInstaller {
         }
 
         emit(log, "🎯 目标容器：\(container)")
+        emit(log, "🔌 写入通道：\(channel.label)")
         emit(log, "🧩 数据结构版本：\(options.structVersion)")
 
         var injected = 0
@@ -111,8 +112,7 @@ final class PosterBoardInstaller {
                     emit(log, "  · [\(folderIndex + 1)/\(folders.count)] → \(extensionID) / \(descriptorUUID)")
 
                     try await runOffMain {
-                        try Airlift.injectFolder(
-                            pairingPath: pairingPath,
+                        try channel.injectFolder(
                             folder: folder.path,
                             parent: parent,
                             destName: descriptorUUID
@@ -124,8 +124,7 @@ final class PosterBoardInstaller {
                         let modernParent = "\(container)/Library/Application Support/PRBPosterExtensionDataStore/\(options.structVersion)/Extensions/\(modernID)/descriptors"
                         do {
                             try await runOffMain {
-                                try Airlift.injectFolder(
-                                    pairingPath: pairingPath,
+                                try channel.injectFolder(
                                     folder: folder.path,
                                     parent: modernParent,
                                     destName: descriptorUUID
@@ -156,7 +155,7 @@ final class PosterBoardInstaller {
         emit(log, "🔄 正在刷新 PosterBoard 缓存…")
         let wrotePreferences = await writePreferences(
             containerPath: container,
-            pairingPath: pairingPath,
+            channel: channel,
             resetProtections: options.resetProtections,
             log: log
         )
@@ -173,13 +172,13 @@ final class PosterBoardInstaller {
 
     /// 单独刷新缓存（不注入壁纸），用于“壁纸已注入但没出现”的救急操作。
     @discardableResult
-    func refreshCache(containerPath: String, pairingPath: String, log: @escaping (String) -> Void) async -> Bool {
+    func refreshCache(containerPath: String, channel: FileChannel, log: @escaping (String) -> Void) async -> Bool {
         var container = containerPath.trimmingCharacters(in: .whitespacesAndNewlines)
         while container.hasSuffix("/") { container.removeLast() }
         guard !container.isEmpty else { return false }
         return await writePreferences(
             containerPath: container,
-            pairingPath: pairingPath,
+            channel: channel,
             resetProtections: true,
             log: log
         )
@@ -189,7 +188,7 @@ final class PosterBoardInstaller {
 
     private func writePreferences(
         containerPath: String,
-        pairingPath: String,
+        channel: FileChannel,
         resetProtections: Bool,
         log: @escaping (String) -> Void
     ) async -> Bool {
@@ -232,16 +231,16 @@ final class PosterBoardInstaller {
             return false
         }
 
-        let targets = [
-            "\(containerPath)/Library/Preferences",
-            "/var/mobile/Library/Preferences"
-        ]
+        var targets = ["\(containerPath)/Library/Preferences"]
+        if channel.supportsGlobalPreferences {
+            targets.append("/var/mobile/Library/Preferences")
+        }
 
         var success = false
         for target in targets {
             do {
                 try await runOffMain {
-                    try Airlift.writeDirectory(pairingPath: pairingPath, source: staging.path, target: target)
+                    try channel.writeTree(source: staging.path, target: target)
                 }
                 emit(log, "  ✓ 已写入 \(target)")
                 if target.hasPrefix(containerPath) { success = true }
