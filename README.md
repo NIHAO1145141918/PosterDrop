@@ -65,12 +65,31 @@ PosterDrop 做四件事：
 3. 调用 `al_exploit_inject_folder` 把目录原子注入，iOS 18+ 再往 `com.apple.Posters.<Name>App` 双写一份；
 4. 写入 `com.apple.PosterBoard.unprotectedUserDefaults.plist`（`PBF_RESET_FILE_PROTECTIONS` 等键），强制系统重新索引，最后用 **NeoSpring** 打崩 SpringBoard 让壁纸立刻出现。
 
+### 4. 两条写入通道（同一套注入逻辑）
+
+| 通道 | 前提 | 适用系统 | 说明 |
+| --- | --- | --- | --- |
+| **配对隧道**（默认） | 有配对记录 + LocalDevVPN（`10.7.0.1`） | iOS 18.0 – 27.2 beta 2 | 走 AirTraffic/RSD，写的是 PosterBoard 真实容器 |
+| **直连**（实验） | 无需配对，无需 VPN | iOS 26.0 – 26.7.2 / 27.2 | 向 containermanagerd 申请沙箱扩展后直接写容器 |
+
+直连通道复现的是 [worse_query](https://github.com/forcequitOS/worse_query) 描述的那类缺陷：
+
+1. 把自己（或自己 App Group）的 `Library/Caches` 换成指向目标的符号链接；
+2. 以 `class=app/appGroup`、`part=3 (Library/Caches)` 发起 `container_query`；
+3. 守护进程按 part 拼路径签发 sandbox extension 时**没有对符号链接做 realpath 校验**，于是扩展实际覆盖链接指向的目录；
+4. `sandbox_extension_consume` 之后，本进程就拿到了 `Data/Application/*` 的读写权；
+5. 遍历该目录，找含 `Library/Application Support/PRBPosterExtensionDataStore` 的容器即为 PosterBoard。
+
+它给的是**目录级扩展**，不是 root，也不会绕过数据保护；系统一旦修补签发逻辑（或容器布局变化）就失效，所以隧道仍是默认通道。
+
 数据流示意：
 
 ```
-.tendies ──解压──> descriptor 目录 ──随机化──> AirTraffic 注入 ──> PosterBoard 存储
-                                                        │
-                                          写 Preferences ┘──> NeoSpring respring ──> 锁屏可选
+.tendies ──解压──> descriptor 目录 ──随机化──> 通道写入 ──> PosterBoard 存储
+                                              ├─ 配对隧道（Airlift/AirTraffic）
+                                              └─ 直连（沙箱扩展）
+                                                      │
+                                        写 Preferences ┘──> NeoSpring respring ──> 锁屏可选
 ```
 
 ---
@@ -79,7 +98,7 @@ PosterDrop 做四件事：
 
 ### [GestaltX](https://github.com/huamidev/GestaltX)（MobileGestalt 编辑器）
 
-GestaltX 编辑的是 `com.apple.MobileGestalt.plist` 这类「能力开关」文件，底层用 [worse_query](https://github.com/forcequitOS/worse_query) 做容器逃逸（可写 `/var/containers/Data/System`、`/var/mobile/Containers/Shared/AppGroup` 等）。三个工程化经验被直接沿用：
+GestaltX 编辑的是 `com.apple.MobileGestalt.plist` 这类「能力开关」文件，底层用 [worse_query](https://github.com/forcequitOS/worse_query) 做容器级沙箱逃逸（可写 `/var/containers/Data/System`、`/var/mobile/Containers/Data/Application/*` 等）。PosterDrop 的直连通道就是这套思路的复用：**PosterBoard 的库正好落在 `Data/Application/*` 里**，所以同一个扩展同样能覆盖它。三个工程化经验也被直接沿用：
 
 - **写前必备份**：任何一次写系统文件前先留原始值，能回滚才敢改；
 - **写入后要校验**：写完重新读一遍确认字节落地（Airlift 的 canary 写入就是同一思路）；
