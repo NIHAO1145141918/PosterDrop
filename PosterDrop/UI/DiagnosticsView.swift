@@ -1,0 +1,297 @@
+//
+//  DiagnosticsView.swift
+//  PosterDrop
+//
+//  诊断页：容器探测、注入参数、缓存刷新、respring、运行日志。
+//
+
+import SwiftUI
+import UIKit
+
+struct DiagnosticsView: View {
+
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject private var logBus = LogBus.shared
+
+    @State private var copiedHint: String?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ScreenBackground()
+
+                ScrollView {
+                    VStack(spacing: 14) {
+                        if let banner = model.banner {
+                            BannerView(banner: banner) {
+                                model.banner = nil
+                            }
+                        }
+
+                        containerCard
+                        optionsCard
+                        actionsCard
+                        logCard
+                        aboutCard
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .padding(.bottom, 24)
+                }
+            }
+            .navigationTitle("诊断")
+            .navigationBarTitleDisplayMode(.inline)
+            .overlay(alignment: .top) {
+                if let hint = copiedHint {
+                    Text(hint)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Color.black.opacity(0.75)))
+                        .padding(.top, 8)
+                        .transition(.opacity)
+                }
+            }
+        }
+    }
+
+    // MARK: - 容器
+
+    private var containerCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("PosterBoard 容器")
+                .font(.subheadline.weight(.semibold))
+
+            Text(model.containerPath.isEmpty ? "尚未探测。点下方按钮自动定位 PosterBoard 的数据容器。" : model.containerPath)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(model.containerPath.isEmpty ? .secondary : .primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await model.detectContainer() }
+                } label: {
+                    Label("自动探测", systemImage: "location.magnifyingglass")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 42)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .disabled(model.isWorking)
+
+                Button {
+                    UIPasteboard.general.string = model.containerPath
+                    flashHint("已复制容器路径")
+                } label: {
+                    Label("复制", systemImage: "doc.on.doc")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(height: 42)
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.containerPath.isEmpty)
+            }
+
+            Text("容器路径形如 /var/mobile/Containers/Data/Application/<UUID>，每次重装系统后可能变化，重新探测即可。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .card()
+    }
+
+    // MARK: - 选项
+
+    private var optionsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("注入参数")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("结构版本 \(model.effectiveStructVersion)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(Theme.accent)
+            }
+
+            Toggle(isOn: $model.autoStructVersion) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("自动选择数据结构版本")
+                        .font(.footnote.weight(.medium))
+                    Text("iOS 17 及以上使用 61，更早的系统使用 59")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .tint(Theme.accent)
+
+            if !model.autoStructVersion {
+                Picker("结构版本", selection: $model.manualStructVersion) {
+                    Text("59（iOS 16 及更早）").tag(59)
+                    Text("61（iOS 17 及以上）").tag(61)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Divider().opacity(0.4)
+
+            Toggle(isOn: $model.resetProtections) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("强制刷新 PosterBoard 缓存")
+                        .font(.footnote.weight(.medium))
+                    Text("重置文件保护标记，让系统立即重新索引壁纸")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .tint(Theme.accent)
+
+            Toggle(isOn: $model.dualInject) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("同时写入新容器（iOS 18+）")
+                        .font(.footnote.weight(.medium))
+                    Text("额外写一份 .Posters.<Name>App，壁纸更容易出现在“墙纸”里")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .tint(Theme.accent)
+        }
+        .card()
+    }
+
+    // MARK: - 操作
+
+    private var actionsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("维护操作")
+                .font(.subheadline.weight(.semibold))
+
+            actionButton(title: "刷新壁纸缓存", subtitle: "壁纸已注入但不显示时使用", symbol: "arrow.triangle.2.circlepath", tint: Theme.accent) {
+                Task { await model.refreshCacheOnly() }
+            }
+
+            actionButton(title: "重启桌面（NeoSpring）", subtitle: "最快，通常 1~2 秒恢复", symbol: "bolt.fill", tint: .orange) {
+                model.respringManually()
+            }
+
+            actionButton(title: "重启桌面（诊断中继）", subtitle: "通过配对通道发送，NeoSpring 失效时用", symbol: "antenna.radiowaves.left.and.right", tint: .blue) {
+                Task { await model.respringViaDiagnostics() }
+            }
+
+            actionButton(title: "打开系统墙纸设置", subtitle: "注入完成后直接挑选壁纸", symbol: "photo.on.rectangle.angled", tint: .green) {
+                Respring.openWallpaperSettings()
+            }
+        }
+        .card()
+    }
+
+    private func actionButton(title: String, subtitle: String, symbol: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(tint))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(.primary)
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(.secondary.opacity(0.6))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.isWorking)
+    }
+
+    // MARK: - 日志
+
+    private var logCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("运行日志")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(logBus.lines.count) 行")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+
+                Button {
+                    UIPasteboard.general.string = logBus.exportText()
+                    flashHint("日志已复制")
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.plain)
+                .disabled(logBus.lines.isEmpty)
+
+                Button {
+                    logBus.clear()
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .disabled(logBus.lines.isEmpty)
+            }
+
+            LogConsoleView(lines: logBus.lines)
+                .frame(height: 220)
+        }
+        .card()
+    }
+
+    // MARK: - 关于
+
+    private var aboutCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("关于")
+                .font(.subheadline.weight(.semibold))
+
+            InfoRow(title: "版本", value: appVersion)
+            InfoRow(title: "适配", value: "iOS 18.0 – 27.2 beta 2")
+            InfoRow(title: "底层", value: "Airlift (AirTraffic)", monospaced: true)
+
+            Text("本工具只做壁纸包的导入与注入，不修改系统 App 的身份或账户信息。写入系统目录属于非官方能力，Apple 可能随时在系统更新中修复；升级到 27.2 beta 3 及以后版本将失效。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("请仅在你自己拥有或获授权管理的设备上使用，操作前务必备份重要数据。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .card()
+    }
+
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        let build = info?["CFBundleVersion"] as? String ?? "1"
+        return "\(short) (\(build))"
+    }
+
+    private func flashHint(_ text: String) {
+        withAnimation { copiedHint = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            withAnimation { copiedHint = nil }
+        }
+    }
+}

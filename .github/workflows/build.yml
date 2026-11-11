@@ -1,0 +1,80 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 底层 Airlift Rust 核心的来源（预编译 xcframework）
+  AIRLIFT_REPO: Mak5er/AirCard-iOS
+  AIRLIFT_REF: 40640c4d827aeab8d798285b57d24fcf6be070d0
+  APP_NAME: PosterDrop
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Fetch AirliftFFI.xcframework
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/fetch-vendor.sh
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build IPA
+        run: ./scripts/build-ipa.sh Release
+
+      - name: Collect dSYM
+        if: always()
+        run: |
+          find build/DerivedData/Build/Products -name "*.dSYM" -maxdepth 3 -print
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PosterDrop-ipa
+          path: build/PosterDrop.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload dSYM
+        uses: actions/upload-artifact@v4
+        with:
+          name: PosterDrop-dsym
+          path: build/DerivedData/Build/Products/**/*.dSYM
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Attach IPA to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/PosterDrop.ipa
+          fail_on_unmatched_files: true
