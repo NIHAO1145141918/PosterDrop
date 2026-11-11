@@ -53,7 +53,9 @@ final class AppModel: ObservableObject {
 
     // MARK: 配对 / 容器
 
-    @Published var containerPath: String = UserDefaults.standard.string(forKey: Keys.container) ?? ""
+    @Published var containerPath: String = UserDefaults.standard.string(forKey: Keys.container) ?? "" {
+        didSet { UserDefaults.standard.set(containerPath, forKey: Keys.container) }
+    }
     @Published var pairingSize: Int = 0
 
     // MARK: 选项

@@ -66,7 +66,10 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
 
     static func locate(group: String, manualContainer: String?, log: @escaping (String) -> Void) throws -> DirectChannel {
         guard let hit = ContainerLocator.findPosterBoard(group: group, manual: manualContainer, log: log) else {
-            throw SandboxEscape.Failure(code: -11, message: "没有找到 PosterBoard 容器")
+            throw SandboxEscape.Failure(
+                code: -11,
+                message: "没有找到 PosterBoard 容器：去 WQFiles 的「App Data › PosterBoard」长按复制容器路径，粘贴到诊断页的输入框再试"
+            )
         }
         log("🎯 PosterBoard 容器（\(hit.source)）：\(hit.path)")
         return DirectChannel(containerPath: hit.path, group: group)

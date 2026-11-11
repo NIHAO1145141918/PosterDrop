@@ -65,12 +65,19 @@ struct DiagnosticsView: View {
             Text("PosterBoard 容器")
                 .font(.subheadline.weight(.semibold))
 
-            Text(model.containerPath.isEmpty ? "尚未探测。点下方按钮自动定位 PosterBoard 的数据容器。" : model.containerPath)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(model.containerPath.isEmpty ? .secondary : .primary)
+            Text(model.containerPath.isEmpty
+                 ? "尚未探测。点「自动探测」定位 PosterBoard 的数据容器；自动定位失败时，可从这里粘贴路径。"
+                 : "当前使用的容器路径。可以直接编辑或粘贴新路径。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            TextField("/var/mobile/Containers/Data/Application/<UUID>", text: $model.containerPath)
+                .font(.system(size: 11, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.asciiCapable)
                 .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.primary.opacity(0.05))
@@ -101,7 +108,7 @@ struct DiagnosticsView: View {
                 .disabled(model.containerPath.isEmpty)
             }
 
-            Text("容器路径形如 /var/mobile/Containers/Data/Application/<UUID>，每次重装系统后可能变化，重新探测即可。")
+            Text("容器路径形如 /var/mobile/Containers/Data/Application/<UUID>，每次重装系统后可能变化。iOS 26 起容器父目录不可枚举，自动定位靠系统数据库；如果失败，去 WQFiles 的「App Data › PosterBoard」长按复制容器路径，粘贴到上面即可。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
