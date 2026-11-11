@@ -89,6 +89,8 @@ final class AppModel: ObservableObject {
     init() {
         resetProtections = UserDefaults.standard.object(forKey: Keys.resetProtections) as? Bool ?? true
         dualInject = UserDefaults.standard.object(forKey: Keys.dualInject) as? Bool ?? true
+        SandboxEscape.recoverPendingSwaps()
+
         autoStructVersion = UserDefaults.standard.object(forKey: Keys.autoVersion) as? Bool ?? true
         directEnabled = UserDefaults.standard.object(forKey: Keys.direct) as? Bool ?? false
         appGroupID = UserDefaults.standard.string(forKey: Keys.appGroup) ?? ""
@@ -470,25 +472,33 @@ final class AppModel: ObservableObject {
 
     // MARK: - 直连通道
 
-    var escapeMode: SandboxEscape.Mode {
-        let group = appGroupID.trimmingCharacters(in: .whitespacesAndNewlines)
-        return group.isEmpty ? .ownContainer : .appGroup(group)
+    /// 解析要用的 App Group：优先用户填的，其次签名里的第一个可用项。
+    /// 这条通道必须有 App Groups 权限，否则 containermanagerd 不会返回结果。
+    var resolvedAppGroup: String? {
+        SandboxEscape.usableGroup(preferred: appGroupID.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// 申请沙箱扩展并定位 PosterBoard 容器（阻塞操作，放到后台线程）
     private func locateDirectChannel() async throws -> DirectChannel {
-        let mode = escapeMode
+        guard let group = resolvedAppGroup else {
+            throw SandboxEscape.Failure(code: -1, message: "签名里没有可用的 App Group，请用带 App Groups 的方式重签")
+        }
+        let manual = containerPath
         return try await Task.detached(priority: .userInitiated) {
-            try DirectChannel.locate(mode: mode)
+            try DirectChannel.locate(group: group, manualContainer: manual, log: { line in
+                LogBus.shared.append(line)
+            })
         }.value
     }
 
     /// 诊断页自检：只验证能不能拿到扩展、能不能看到 PosterBoard 容器
     func probeDirectChannel() async {
         directStatus = "正在申请沙箱扩展…"
-        let mode = escapeMode
+        let preferred = appGroupID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let manual = containerPath
+
         let report = await Task.detached(priority: .userInitiated) {
-            DirectChannel.probe(mode: mode)
+            DirectChannel.probe(group: preferred.isEmpty ? nil : preferred, manualContainer: manual)
         }.value
 
         directStatus = report

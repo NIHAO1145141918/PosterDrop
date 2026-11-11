@@ -121,7 +121,7 @@ struct DiagnosticsView: View {
                     .foregroundColor(model.directEnabled ? Theme.accent : .secondary)
             }
 
-            Text("不经过配对隧道，在 App 内直接向 PosterBoard 容器申请沙箱扩展后写入。依赖 containermanagerd 的符号链接签发缺陷，仅 iOS 26.0–26.7.2 / 27.2 有效。")
+            Text("不经过配对隧道，在 App 内直接向 PosterBoard 容器申请沙箱扩展后写入。依赖 containermanagerd 的符号链接签发缺陷，iOS 26.0–26.7.2 与 27.x 有效（27.2 beta 3 之后隧道已废，这条仍可用）。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -137,7 +137,7 @@ struct DiagnosticsView: View {
             }
             .tint(Theme.accent)
 
-            TextField("App Group（可留空）", text: $model.appGroupID)
+            TextField("App Group（留空则读签名）", text: $model.appGroupID)
                 .font(.system(size: 12, design: .monospaced))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -147,7 +147,7 @@ struct DiagnosticsView: View {
                         .fill(Color.primary.opacity(0.05))
                 )
 
-            Text("留空表示用 App 自身的数据容器当跳板，不需要任何特殊 entitlement；填入 group.* 则走 App Group（需要签名 profile 带 App Groups 能力）。")
+            Text("这条通道必须有 App Groups 权限：containermanagerd 只对 App Group 容器返回结果。留空会自动读取签名里的 com.apple.security.application-groups；重签时在「轻松签 / ESign → App Groups」里勾一个 group 即可，免费 Personal Team 通常也能签发。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
