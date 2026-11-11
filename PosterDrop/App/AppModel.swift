@@ -428,7 +428,7 @@ final class AppModel: ObservableObject {
     /// respring 没生效时（App 仍然活着），十几秒后自动撤掉遮罩，避免卡在黑屏。
     private func scheduleOverlayReset() {
         Task {
-            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
             self.isRespringing = false
         }
     }

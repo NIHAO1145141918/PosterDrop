@@ -62,12 +62,21 @@ enum Respring {
             let configuration = WKWebViewConfiguration()
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
 
+            // 反复触发时只保留一个遮罩
+            window.viewWithTag(0x9D0C)?.removeFromSuperview()
+
             let webView = WKWebView(frame: window.bounds, configuration: configuration)
             webView.isOpaque = true
             webView.backgroundColor = .black
             webView.tag = 0x9D0C
             window.addSubview(webView)
             webView.loadHTMLString(neoSpringHTML, baseURL: nil)
+
+            // 正常情况下 SpringBoard 会立刻重启；若没生效，8 秒后撤掉遮罩，避免一直黑屏
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                webView.stopLoading()
+                webView.removeFromSuperview()
+            }
 
             completion?()
         }
