@@ -54,6 +54,18 @@ enum ContainerLocator {
             }
         }
 
+        // 有些系统版本枚举得到 path 但拿不到 identifier；退一步逐个验证（限量，避免卡太久）
+        let pool = enumerated.filter { $0.path.contains("/Containers/") }.prefix(80)
+        if !pool.isEmpty {
+            log("①b 逐个验证枚举到的容器（最多 80 个，可能要十几秒）…")
+            for item in pool {
+                if verify(path: item.path, group: group, log: { _ in }) {
+                    log("   命中：\(item.path)")
+                    return Hit(path: canonical(item.path), source: "容器扫描")
+                }
+            }
+        }
+
         log("② 通过 LaunchServices 查询已安装应用…")
         for item in launchServicesContainers() where matches(item.identifier) {
             log("   命中 \(item.identifier)：\(item.path)")
