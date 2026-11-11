@@ -4,7 +4,8 @@
 
 PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → 立刻可用**。
 
-- 全部操作在 iPhone 本地完成（Airlift 通道 + 本机回环隧道）
+- 全部操作在 iPhone 本地完成：配对隧道（Airlift/AirTraffic）或直连通道（container 沙箱扩展），二选一
+- 支持 iOS 18.0 – 27.2 beta 2（隧道）/ 26.0 – 27.2（直连），详见[兼容性](#一兼容性)
 - 支持 `.tendies` / `.zip` / 整容器归档，自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
 - 自动抽取预览图、判定描述符数量、双写 iOS 18+ 的新容器
 - 内置配对管理、容器探测、缓存刷新、NeoSpring respring、运行日志
@@ -15,17 +16,62 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 
 ## 一、兼容性
 
-| 系统版本 | 状态 | 配对方式 |
+### 1.1 应用本体
+
+| 项目 | 要求 |
+| --- | --- |
+| 系统 | **iOS 18.0 及以上**（部署目标 `IPHONEOS_DEPLOYMENT_TARGET = 18.0`） |
+| 机型 | **iPhone**（`TARGETED_DEVICE_FAMILY = 1`，未适配 iPad） |
+| 架构 | arm64（AirliftFFI 只带 arm64 切片，模拟器仅 arm64） |
+| 安装 | 未签名 IPA，需 SideStore / AltStore / Sideloadly / TrollStore 自签 |
+
+### 1.2 两条通道 × 系统版本
+
+两条通道互相独立：**任意一条可用就能完成注入**。默认走配对隧道，直连通道需在「诊断 › 直连通道」手动开启。
+
+| iOS 版本 | 配对隧道（Airlift / AirTraffic） | 直连通道（container 沙箱扩展） |
 | --- | --- | --- |
-| iOS 27.0 – 27.2 beta 2 | ✅ 支持 | 本机配对 / 导入配对文件 |
-| iOS 18.0 – 26.x | ✅ 支持 | 仅导入配对文件 |
-| iOS 27.2 beta 3 及以后 | ❌ 已修复 | Apple 在 AirTraffic 同步链路上打了补丁 |
+| 17.x 及更早 | ❌ 低于部署目标 | ❌ 低于部署目标 |
+| 18.0 – 18.x | ✅ | ❌ 签发缺陷不存在 |
+| 19 – 25.x | ✅ | ❌ 签发缺陷不存在 |
+| 26.0 – 26.6.1 | ✅ | ✅（App Group 查询需备用 flags，已内置） |
+| 26.7 – 26.7.2 | ✅ | ✅ |
+| 26.7.3 及以后 / 26.8 | ⚠️ 未验证 | ⚠️ 未验证 |
+| 27.0 – 27.2 beta 2 | ✅ | ✅ |
+| **27.2 beta 3 及以后** | ❌ **Apple 已修复 AirTraffic 同步链路** | ⚠️ 可能仍可用（容器签发缺陷与 AirTraffic 无关），未验证 |
 
-前置条件：
+> 「✅」= 有公开实现或本文档对应的代码路径；「⚠️」= 没有设备验证，请先跑自检；「❌」= 明确不可用。
 
-1. **LocalDevVPN / WireGuard 回环模式**：隧道地址 `10.7.0.1`，Airlift 默认往这里拨号。
-2. **一份有效配对记录**：SideStore / LiveContainer / 电脑导出，或 iOS 27+ 的本机配对。
-3. 设备已解锁（首次注入时系统会校验数据保护状态）。
+### 1.3 各通道前置条件
+
+**配对隧道**
+
+1. LocalDevVPN / WireGuard 回环模式，隧道地址 `10.7.0.1`；
+2. 一份有效配对记录（SideStore / LiveContainer / 电脑导出，或 iOS 27+ 本机配对）；
+3. 设备已解锁（首次注入会校验数据保护状态）。
+
+**直连通道**
+
+1. 不需要配对记录，不需要 VPN；
+2. 需要系统仍存在 container 签发缺陷（见 1.2 表）；
+3. 默认用 App 自身容器当跳板，不需要任何特殊 entitlement；
+   若填 `group.*` 走 App Group，则签名 profile 必须带 App Groups 能力（免费 Apple ID 不具备）；
+4. 设备已解锁。
+
+### 1.4 怎么确认自己这台能用
+
+打开「诊断 › 直连通道 › 自检通道」，输出含义：
+
+| 输出 | 含义 |
+| --- | --- |
+| `✅ 已获得 /var/mobile/Containers/Data/Application 的沙箱扩展` | 签发缺陷存在，直连可用 |
+| `✅ PosterBoard 容器：/var/mobile/...` | 已定位到目标容器，可以直接应用壁纸 |
+| `❌ 申请扩展失败：…（代码 -5）` | containermanagerd 拒绝查询，多为系统已修补或 flags 不匹配 |
+| `❌ 申请扩展失败：…（代码 -6）` | 内核拒绝签发扩展，同上 |
+| `❌ 申请扩展失败：…（代码 -1）` | App Group 容器不存在（没填或没有该 entitlement） |
+| `❌ 在 N 个容器里没有找到 PosterBoard` | 扩展拿到了但看不到目标，通常是数据保护锁着（解锁后重试） |
+
+隧道是否可用，看「配对」页的隧道状态与日志里的 RSD 握手结果。
 
 ---
 
