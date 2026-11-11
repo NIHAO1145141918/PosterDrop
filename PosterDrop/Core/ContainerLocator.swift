@@ -131,36 +131,58 @@ enum ContainerLocator {
 
     // MARK: - ❶ MobileInstallation 映射
 
-    /// 这两个 plist 的路径是固定的，不需要先知道任何 UUID。
-    private static let mapLocations: [(directory: String, file: String)] = [
-        ("/var/mobile/Library/MobileInstallation", "LastLaunchServicesMap.plist"),
-        ("/var/mobile/Library/Caches", "com.apple.mobile.installation.plist"),
-        ("/var/mobile/Library/MobileInstallation", "com.apple.mobile.installation.plist")
+    /// 这些路径是固定的，不需要先知道任何 UUID；文件名变了也能扫到。
+    private static let mapDirectories = [
+        "/var/mobile/Library/MobileInstallation",
+        "/var/mobile/Library/Caches"
+    ]
+
+    private static let preferredMapFiles = [
+        "LastLaunchServicesMap.plist",
+        "com.apple.mobile.installation.plist",
+        "com.apple.mobile_installation.plist"
     ]
 
     private static func mobileInstallationCandidates(group: String, log: (String) -> Void) -> [String] {
         var results: [String] = []
-        var tried = Set<String>()
+        var scanned = Set<String>()
 
-        for location in mapLocations {
-            let file = location.directory + "/" + location.file
-            guard tried.insert(file).inserted else { continue }
-
-            log("   读取 \(file)…")
-            guard (try? SandboxEscape.grant(path: location.directory, group: group)) != nil else {
-                log("   ⚠️ 无法为 \(location.directory) 申请扩展（不存在或权限不足）")
-                continue
-            }
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: file)),
-                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) else {
-                log("   ⚠️ 读不到或解析失败")
+        for directory in mapDirectories {
+            guard (try? SandboxEscape.grant(path: directory, group: group)) != nil else {
+                log("   ⚠️ 无法为 \(directory) 申请扩展（不存在或权限不足）")
                 continue
             }
 
-            if let path = findContainer(in: plist, bundleID: posterBoardBundleID) {
-                results.append(path)
-            } else {
-                log("   映射里没有 \(posterBoardBundleID)")
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            var files = Set(preferredMapFiles.filter { names.contains($0) })
+
+            // 系统改名时兜底：挑名字像安装/启动服务数据库的 plist 再试几个
+            let extra = names.filter { name in
+                let lower = name.lowercased()
+                guard lower.hasSuffix(".plist"), !files.contains(name) else { return false }
+                return lower.contains("launchservices")
+                    || lower.contains("installation")
+                    || lower.contains("appinfo")
+                    || lower.contains("container")
+            }
+            files.formUnion(extra.prefix(6))
+
+            for file in files.sorted() {
+                let path = directory + "/" + file
+                guard scanned.insert(path).inserted else { continue }
+
+                log("   读取 \(path)…")
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                      let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) else {
+                    log("   ⚠️ 读不到或解析失败")
+                    continue
+                }
+
+                if let container = findContainer(in: plist, bundleID: posterBoardBundleID) {
+                    results.append(container)
+                } else {
+                    log("   映射里没有 \(posterBoardBundleID)")
+                }
             }
         }
         return results

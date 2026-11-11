@@ -82,11 +82,15 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 | 顺序 | 方法 | 说明 |
 | --- | --- | --- |
 | ① | 手动路径 | 诊断页里粘贴容器路径（WQFiles 的 App Data 里能看到 `com.apple.PosterBoard`） |
-| ② | containermanagerd 枚举 | 遍历 class 1–14，用 `container_object_get_identifier` 匹配 |
-| ③ | LaunchServices | `LSApplicationWorkspace` 取 `dataContainerURL` |
-| ④ | 按 bundle id 查询 | `container_query_set_identifiers(class 2)`，多数系统会拒绝 |
+| ❷ | MobileInstallation 映射 | 读 `LastLaunchServicesMap.plist` / `com.apple.mobile.installation.plist`，取 `DataContainer`；文件名变了会扫目录里同类的 plist |
+| ❸ | LaunchServices | `LSApplicationWorkspace` 取 `dataContainerURL`，含 `applicationProxyForIdentifier:` 兜底 |
+| ❹ | containermanagerd 枚举 | 遍历 class 1–14，带 `container_query_set_include_other_owners(true)` |
+| ❺ | 按 bundle id 查询 | `container_query_set_identifiers(class 2)`，同时试 `xpc_string` / `xpc_array` |
+| ❻ | 容器父目录列举 | 通常被拒，最后试一次 |
 
 命中后还会验证 `<容器>/Library/Application Support/PRBPosterExtensionDataStore` 是否真实存在，只有这一步通过才算可用。
+
+> **iOS 27 实测（27.0 / 24A5370h）**：`container_query` 枚举 class 1–14 返回 **0 个容器**，容器父目录也不允许 `opendir`——worse_query 的能力是“已知路径 → 签发扩展”，不是“枚举出路径”。所以自动定位主要靠 ❷ 的系统数据库；如果连数据库也读不到，就去 WQFiles 的「App Data › PosterBoard」长按复制容器路径，粘贴到诊断页的输入框（那里现在可以直接编辑）。
 
 ### 1.5 怎么确认自己这台能用
 
@@ -102,6 +106,9 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 | `❌ 申请扩展失败：…（代码 -6）` | 内核拒绝签发扩展，同上 |
 | `❌ 申请扩展失败：…（代码 -8）` | 签发成功但目标打不开，通常是系统已修补 |
 | `❌ 签名里没有可用的 App Group` | 签名缺 App Groups entitlement |
+| `❌ 没有找到 PosterBoard 容器（代码 -11）` | 自动定位全部落空：按提示去 WQFiles 复制容器路径，粘进诊断页输入框 |
+
+自检成功后，找到的容器路径会自动保存，后续「应用」直接用，不用再探测。
 
 隧道是否可用，看「配对」页的隧道状态与日志里的 RSD 握手结果。
 

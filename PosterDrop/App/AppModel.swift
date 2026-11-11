@@ -499,13 +499,17 @@ final class AppModel: ObservableObject {
         let preferred = appGroupID.trimmingCharacters(in: .whitespacesAndNewlines)
         let manual = containerPath
 
-        let report = await Task.detached(priority: .userInitiated) {
+        let result = await Task.detached(priority: .userInitiated) {
             DirectChannel.probe(group: preferred.isEmpty ? nil : preferred, manualContainer: manual)
         }.value
 
-        directStatus = report
+        directStatus = result.report
+        if let path = result.containerPath, !path.isEmpty {
+            containerPath = path
+        }
+
         LogBus.shared.append("— 直连通道自检 —")
-        for line in report.split(separator: "\n") {
+        for line in result.report.split(separator: "\n") {
             LogBus.shared.append(String(line))
         }
     }

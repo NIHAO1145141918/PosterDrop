@@ -47,6 +47,12 @@ final class TunnelChannel: FileChannel {
 
 // MARK: - 直连通道
 
+/// 自检结果：报告文本 + 真正可用的容器路径（有就顺手存下来）。
+struct ProbeResult: Sendable {
+    let report: String
+    let containerPath: String?
+}
+
 /// 借 App Group 的沙箱扩展直接写 PosterBoard 容器。
 /// 每次落盘前都确保目标路径（或最近的已存在父目录）已被扩展覆盖。
 final class DirectChannel: FileChannel, @unchecked Sendable {
@@ -76,7 +82,7 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
     }
 
     /// 只做探测，不安装：给诊断页用。
-    static func probe(group: String?, manualContainer: String?) -> String {
+    static func probe(group: String?, manualContainer: String?) -> ProbeResult {
         var lines: [String] = []
 
         let groups = SandboxEscape.entitledGroups()
@@ -86,17 +92,18 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
             lines.append("❌ 没有可用的 App Group 容器")
             lines.append("这条通道要求签名里带 com.apple.security.application-groups。")
             lines.append("用 轻松签 / ESign 重签时勾选 App Groups，或用一个允许 App Groups 的 profile（含免费 Personal Team）。")
-            return lines.joined(separator: "\n")
+            return ProbeResult(report: lines.joined(separator: "\n"), containerPath: nil)
         }
         lines.append("使用的 App Group：\(group)")
 
         do {
-            _ = try locate(group: group, manualContainer: manualContainer, log: { lines.append($0) })
+            let channel = try locate(group: group, manualContainer: manualContainer, log: { lines.append($0) })
             lines.append("✅ 容器可用，可以直接应用壁纸")
+            return ProbeResult(report: lines.joined(separator: "\n"), containerPath: channel.containerPath)
         } catch {
             lines.append("❌ \(error.localizedDescription)")
+            return ProbeResult(report: lines.joined(separator: "\n"), containerPath: nil)
         }
-        return lines.joined(separator: "\n")
     }
 
     // MARK: 写入
