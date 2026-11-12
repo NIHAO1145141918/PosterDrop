@@ -138,7 +138,7 @@ final class PosterBoardInstaller {
                         if dual == nil {
                             let hit = try? await runOffMain {
                                 ContainerLocator.find(bundleID: modernID, group: dualGroup, manual: nil, log: { line in
-                                    emit(log, "  · " + line)
+                                    self.emit(log, "  · " + line)
                                 })
                             }
                             if let hit {

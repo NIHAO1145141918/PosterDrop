@@ -48,23 +48,7 @@
 	<key>UIStatusBarStyle</key>
 	<string>UIStatusBarStyleDefault</string>
 
-	<!-- 本机配对需要：本地网络权限 + Bonjour 广播 -->
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>PosterDrop 会通过本机回环通道与系统壁纸服务通信，并广播一次性配对服务，以便你在“设置 › 开发者模式”中授权本机配对。</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_remotepairing-pairable-host._tcp</string>
-		<string>_remotepairing-pairable-host._tcp.</string>
-		<string>_posterdrop-probe._tcp</string>
-	</array>
-
-	<!-- 配对期间保活：用户切到“设置”输入 PIN 时不被系统挂起 -->
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>audio</string>
-	</array>
-
-	<!-- 允许通过“文件”App 直接放入壁纸 / 配对文件 -->
+	<!-- 允许通过“文件”App 直接放入壁纸包 -->
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
@@ -76,7 +60,6 @@
 		<string>App-prefs</string>
 		<string>app-prefs</string>
 		<string>App-Prefs</string>
-		<string>localdevvpn</string>
 	</array>
 
 	<key>CFBundleDocumentTypes</key>
@@ -94,42 +77,8 @@
 				<string>com.posterdrop.posterboard</string>
 			</array>
 		</dict>
-		<dict>
-			<key>CFBundleTypeName</key>
-			<string>设备配对文件</string>
-			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
-			<key>LSHandlerRank</key>
-			<string>Alternate</string>
-			<key>LSItemContentTypes</key>
-			<array>
-				<string>com.posterdrop.pairing</string>
-			</array>
-		</dict>
 	</array>
 
-	<key>UTImportedTypeDeclarations</key>
-	<array>
-		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>com.posterdrop.pairing</string>
-			<key>UTTypeDescription</key>
-			<string>设备配对记录</string>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.data</string>
-				<string>public.xml</string>
-			</array>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>mobiledevicepairing</string>
-					<string>mobilepair</string>
-				</array>
-			</dict>
-		</dict>
-	</array>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
