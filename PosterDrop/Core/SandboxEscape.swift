@@ -158,7 +158,10 @@ enum SandboxEscape {
         for flags in [primary, secondary] {
             let handle: Int64
             do {
-                handle = try queryToken(group: group, library: base + "/Library", target: canonical, flags: flags)
+                // 每次尝试都重新交换一遍：一次交换只服务一次查询，失败也能干净还原。
+                let swap = try CacheSwap(library: base + "/Library", target: canonical)
+                defer { swap.finish() }
+                handle = try queryToken(group: group, flags: flags)
             } catch let failure as Failure {
                 lastCode = failure.code
                 continue
@@ -206,7 +209,9 @@ enum SandboxEscape {
     private static let containerClassAppGroup: UInt64 = 7
     private static let partCaches: UInt64 = 3
 
-    private static func queryToken(group: String, library: String, target: String, flags: UInt64) throws -> Int64 {
+    /// 发一次查询并 consume 拿到的 token。
+    /// 前置条件：`<group>/Library/Caches` 此刻已是指向目标路径的符号链接。
+    private static func queryToken(group: String, flags: UInt64) throws -> Int64 {
         guard let manager = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL) else {
             throw Failure(code: -2, message: "无法加载 libsystem_containermanager")
         }
@@ -239,9 +244,6 @@ enum SandboxEscape {
             throw Failure(code: -2, message: "系统缺少 sandbox_extension_consume")
         }
         let consume = unsafeBitCast(consumePointer, to: Consume.self)
-
-        let swap = try CacheSwap(library: library, target: target)
-        defer { swap.finish() }
 
         guard let query = create() else {
             throw Failure(code: -3, message: "创建容器查询失败")
@@ -365,6 +367,18 @@ enum SandboxEscape {
             active = true
         }
 
+        /// 把符号链接改指另一个目标：批量签发时省掉「移走 / 移回 Caches」的开销。
+        /// 备份目录与恢复标记保持不动，中途被杀仍能由 recover() 还原。
+        func retarget(to newTarget: String) throws {
+            let caches = library + "/Caches"
+            try? FileManager.default.removeItem(atPath: caches)
+            do {
+                try FileManager.default.createSymbolicLink(atPath: caches, withDestinationPath: newTarget)
+            } catch {
+                throw Failure(code: -4, message: "无法重建符号链接：\(error.localizedDescription)")
+            }
+        }
+
         func finish() {
             guard active else {
                 close(lockFD)
@@ -417,6 +431,81 @@ enum SandboxEscape {
             try? fileManager.removeItem(atPath: markerPath)
             _ = dict
         }
+    }
+
+    // MARK: - 批量签发（枚举容器时用）
+
+    /// 一次交换里给很多路径签发扩展。
+    ///
+    /// 枚举容器时每个候选都要一次 token；如果每个都完整交换一次 Caches，
+    /// 几百个容器要好几秒。这里只保留一份备份，之后仅重指符号链接。
+    /// 用完必须 `finish()`，否则 Caches 会一直指着最后一个目标（有恢复标记兜底）。
+    final class Sweeper {
+
+        private let group: String
+        private let swap: CacheSwap
+        private var finished = false
+
+        init?(group: String) {
+            guard let base = SandboxEscape.groupContainerPath(group),
+                  let swap = try? CacheSwap(library: base + "/Library", target: "/") else {
+                return nil
+            }
+            self.group = group
+            self.swap = swap
+        }
+
+        /// 全新签发一个 handle；调用方负责 release。失败返回 nil，不抛错。
+        func grant(_ path: String) -> Int64? {
+            let canonical = SandboxEscape.canonicalPath(path)
+            let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+            let candidates: [UInt64] = major >= 27
+                ? [0x0000_0080_0000_0000, 0x0000_0008_0000_0000]
+                : [0x0000_0008_0000_0000, 0x0000_0080_0000_0000]
+
+            for flags in candidates {
+                guard (try? swap.retarget(to: canonical)) != nil else { return nil }
+                guard let handle = try? SandboxEscape.queryToken(group: group, flags: flags) else { continue }
+                if SandboxEscape.opens(canonical) {
+                    return handle
+                }
+                SandboxEscape.release(handle)
+            }
+            return nil
+        }
+
+        /// 读容器根目录的扩展属性，值就是这个容器所属 App 的 bundle id。
+        /// 比“读目录里有没有某个子目录”快得多，也不受数据保护影响。
+        func identifier(of path: String) -> String? {
+            guard let handle = grant(path) else { return nil }
+            defer { SandboxEscape.release(handle) }
+            return SandboxEscape.containerIdentifier(at: path)
+        }
+
+        /// 是否能在这个路径下看到指定相对路径（用于最终确认 PRBPosterExtensionDataStore）。
+        func contains(_ path: String, relative: String) -> Bool {
+            guard let handle = grant(path) else { return false }
+            defer { SandboxEscape.release(handle) }
+            var status = stat()
+            return stat(path + "/" + relative, &status) == 0
+        }
+
+        func finish() {
+            guard !finished else { return }
+            finished = true
+            swap.finish()
+        }
+
+        deinit { finish() }
+    }
+
+    /// 容器的扩展属性 com.apple.containermanager.identifier，值形如 com.apple.PosterBoard。
+    static func containerIdentifier(at path: String) -> String? {
+        var buffer = [CChar](repeating: 0, count: 1024)
+        let length = getxattr(path, "com.apple.containermanager.identifier", &buffer, buffer.count - 1, 0, 0)
+        guard length > 0 else { return nil }
+        let value = String(cString: buffer)
+        return value.isEmpty ? nil : value
     }
 
     /// 启动时调用：把上次异常中断的交换恢复掉。

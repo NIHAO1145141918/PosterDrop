@@ -108,7 +108,7 @@ struct DiagnosticsView: View {
                 .disabled(model.containerPath.isEmpty)
             }
 
-            Text("容器路径形如 /var/mobile/Containers/Data/Application/<UUID>，每次重装系统后可能变化。iOS 26 起容器父目录不可枚举，自动定位靠系统数据库；如果失败，去 WQFiles 的「App Data › PosterBoard」长按复制容器路径，粘贴到上面即可。")
+            Text("容器路径形如 /var/mobile/Containers/Data/Application/<UUID>。自动探测会用 fsgetpath 把容器目录里的 UUID 全部反查出来（不需要 VPN，也不需要读目录权限），再逐个认领 bundle id——第一次要扫几秒。如果还是失败，去 WQFiles 的「App Data › PosterBoard」长按复制路径粘贴到上面。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

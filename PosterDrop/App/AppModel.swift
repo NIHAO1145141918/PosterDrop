@@ -282,7 +282,8 @@ final class AppModel: ObservableObject {
 
         refreshPairingState()
 
-        let useDirect = directEnabled
+        // 没有配对记录时隧道根本没法用，直接走直连（不需要 VPN）
+        let useDirect = directEnabled || !hasPairing
         let pairing = pairingPath
 
         if !useDirect {
@@ -423,7 +424,8 @@ final class AppModel: ObservableObject {
             busyLabel = ""
         }
 
-        if directEnabled {
+        refreshPairingState()
+        if directEnabled || !hasPairing {
             do {
                 let channel = try await locateDirectChannel()
                 containerPath = channel.containerPath
@@ -462,7 +464,8 @@ final class AppModel: ObservableObject {
         let channel: FileChannel
         var container = containerPath
 
-        if directEnabled {
+        refreshPairingState()
+        if directEnabled || !hasPairing {
             do {
                 let direct = try await locateDirectChannel()
                 channel = direct

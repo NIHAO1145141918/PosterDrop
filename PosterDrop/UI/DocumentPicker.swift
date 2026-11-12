@@ -20,6 +20,8 @@ import UniformTypeIdentifiers
 
 struct DocumentPicker: UIViewControllerRepresentable {
 
+    /// 配对文件一次只要一个，壁纸可以多选。
+    var allowsMultipleSelection: Bool = true
     var onPick: ([URL]) -> Void
     var onCancel: () -> Void = {}
 
@@ -30,7 +32,7 @@ struct DocumentPicker: UIViewControllerRepresentable {
             forOpeningContentTypes: [.data, .folder],
             asCopy: true
         )
-        picker.allowsMultipleSelection = true
+        picker.allowsMultipleSelection = allowsMultipleSelection
         picker.shouldShowFileExtensions = true
         picker.delegate = context.coordinator
         return picker

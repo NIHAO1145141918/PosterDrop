@@ -19,15 +19,6 @@ struct PairingView: View {
     @State private var isPairing = false
     @State private var showDeleteConfirm = false
 
-    private var pairingTypes: [UTType] {
-        var types: [UTType] = []
-        if let custom = UTType("com.posterdrop.pairing") {
-            types.append(custom)
-        }
-        types.append(contentsOf: [.propertyList, .xml, .data])
-        return types
-    }
-
     var body: some View {
         NavigationStack {
             ZStack {
@@ -69,20 +60,21 @@ struct PairingView: View {
                 }
             }
             .onAppear { refresh() }
-            .fileImporter(
-                isPresented: $showImporter,
-                allowedContentTypes: pairingTypes,
-                allowsMultipleSelection: false
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    if let url = urls.first {
-                        model.importPairing(from: url)
-                        refresh()
-                    }
-                case .failure(let error):
-                    model.banner = .error("选择配对文件失败：\(error.localizedDescription)")
+            .sheet(isPresented: $showImporter) {
+                // 配对文件以前走 .fileImporter + .propertyList/.data，
+                // 同样会被 iOS 27 的文件选择器整片置灰（.data 是抽象类型）。
+                // 换成 UIKit 选择器 + public.data，选完拿的是临时副本。
+                DocumentPicker(allowsMultipleSelection: false) { urls in
+                    showImporter = false
+                    guard let url = urls.first else { return }
+                    LogBus.shared.append("📂 选择配对文件：\(url.lastPathComponent)")
+                    model.importPairing(from: url)
+                    refresh()
+                } onCancel: {
+                    showImporter = false
+                    LogBus.shared.append("📂 已取消选择配对文件")
                 }
+                .ignoresSafeArea()
             }
             .confirmationDialog("删除本机保存的配对凭据？", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
                 Button("删除", role: .destructive) {

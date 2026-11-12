@@ -156,12 +156,12 @@ struct LibraryView: View {
             HStack(spacing: 6) {
                 Image(systemName: model.directEnabled
                       ? "bolt.horizontal.circle.fill"
-                      : (model.hasPairing ? "checkmark.seal.fill" : "exclamationmark.seal"))
+                      : (model.hasPairing ? "checkmark.seal.fill" : "bolt.horizontal.circle"))
                     .font(.caption)
-                    .foregroundColor(model.directEnabled ? Theme.accent : (model.hasPairing ? .green : .orange))
+                    .foregroundColor(model.directEnabled ? Theme.accent : (model.hasPairing ? .green : Theme.accent))
                 Text(model.directEnabled
-                     ? "直连通道已启用，无需配对"
-                     : (model.hasPairing ? "配对记录已就绪" : "还没有配对记录，应用前请先完成配对"))
+                     ? "直连通道已启用，无需配对、无需 VPN"
+                     : (model.hasPairing ? "配对记录已就绪" : "没有配对记录时会自动走直连，不需要 VPN"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

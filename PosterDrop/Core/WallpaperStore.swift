@@ -112,6 +112,8 @@ final class WallpaperStore {
 
         let size = Self.sizeOfItem(at: destination)
         log("   · \(parsed.kind.title)，\(parsed.descriptorCount) 个描述符，\(parsed.isDirectory ? "文件夹" : "\(parsed.entryCount) 个条目")")
+        log("   \(parsed.previewJPEG == nil ? "⚠️ 没取到预览图（不影响应用）" : "已生成预览图")，共 \(Self.readableSize(size))")
+        log("   ✅ 已保存为 \(destination.lastPathComponent)")
 
         var item = WallpaperItem(
             name: (fileName as NSString).deletingPathExtension,
@@ -222,8 +224,14 @@ final class WallpaperStore {
         return candidate
     }
 
-    static func sizeOfItem(at url: URL) -> Int64 {
-        let manager = FileManager.default
+    static func readableSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = bytes >= 1024 * 1024 ? [.useMB] : [.useKB]
+        return formatter.string(fromByteCount: max(bytes, 0))
+    }
+
+    static func sizeOfItem(at url: URL) -> Int64 {        let manager = FileManager.default
         var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return 0 }
         if !isDirectory.boolValue {

@@ -53,7 +53,13 @@ enum ContainerLocator {
             }
         }
 
-        log("❸ 通过 LaunchServices 查询已安装应用…")
+        log("❸ 用 fsgetpath 反查容器目录（不需要 VPN，也不需要读目录权限）…")
+        let leaked = leakApplicationContainers(log: log)
+        if let hit = sweepApplicationContainers(leaked, group: group, log: log) {
+            return hit
+        }
+
+        log("❹ 通过 LaunchServices 查询已安装应用…")
         let services = launchServicesContainers()
         log("   LaunchServices 返回 \(services.count) 条容器记录")
         for item in services where matches(item.identifier) {
@@ -63,7 +69,7 @@ enum ContainerLocator {
             }
         }
 
-        log("❹ 向 containermanagerd 枚举容器…")
+        log("❺ 向 containermanagerd 枚举容器…")
         let enumerated = enumerateContainers()
         log("   可见容器 \(enumerated.count) 个")
         for item in enumerated where matches(item.identifier) {
@@ -85,7 +91,7 @@ enum ContainerLocator {
             }
         }
 
-        log("❺ 直接按 bundle id 查询容器…")
+        log("❻ 直接按 bundle id 查询容器…")
         if let path = queryByIdentifier(bundleID: posterBoardBundleID, group: group) {
             log("   返回：\(path)")
             if verify(path: path, group: group, log: log) {
@@ -93,7 +99,7 @@ enum ContainerLocator {
             }
         }
 
-        log("❻ 尝试列举应用容器父目录…")
+        log("❼ 尝试列举应用容器父目录…")
         if let hit = scanApplicationContainers(group: group, log: log) {
             return hit
         }
@@ -129,6 +135,128 @@ enum ContainerLocator {
         return false
     }
 
+    // MARK: - ❸ fsgetpath 反查
+
+    /// 所有 App 的数据容器都在这一个目录下，路径固定，只是每台机器的 UUID 不同。
+    private static let applicationRoot = "/private/var/mobile/Containers/Data/Application"
+
+    private typealias FSGetPath = @convention(c) (UnsafeMutablePointer<CChar>?, Int, UnsafeMutablePointer<fsid_t>?, UInt64) -> Int
+
+    /// `fsgetpath` 把 (卷, inode) 还原成路径，这一步不受沙箱限制——
+    /// 不需要读目录、不需要 LaunchServices、也不需要 VPN。
+    /// 代价是要把 inode 挨个试一遍，所以用「自己刚建的文件」的 inode 当上界
+    /// （inode 单调递增，比它大的都还不存在）。
+    private static func leakApplicationContainers(log: (String) -> Void) -> [String] {
+        var filesystem = statfs()
+        guard statfs(applicationRoot, &filesystem) == 0 else {
+            log("   ⚠️ 无法 statfs \(applicationRoot)")
+            return []
+        }
+        var fsid = filesystem.f_fsid
+
+        guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fsgetpath") else {
+            log("   ⚠️ 系统没有 fsgetpath")
+            return []
+        }
+        let fsgetpath = unsafeBitCast(pointer, to: FSGetPath.self)
+
+        var limit: UInt64 = 0
+        let probe = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".pd-inode-\(UUID().uuidString)")
+        if (try? Data("x".utf8).write(to: probe)) != nil {
+            var info = stat()
+            if stat(probe.path, &info) == 0, info.st_ino > 0 { limit = info.st_ino }
+            try? FileManager.default.removeItem(at: probe)
+        }
+        if limit == 0 { limit = 3_000_000 }
+        limit = min(limit, 12_000_000)
+
+        let prefix = Array(applicationRoot.utf8).map { CChar(bitPattern: $0) }
+        let slash = CChar(UInt8(ascii: "/"))
+        let prefixLength = prefix.count
+        let nestedSlash = Int32(UInt8(ascii: "/"))
+
+        var results: [String] = []
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let started = Date()
+
+        buffer.withUnsafeMutableBufferPointer { raw in
+            guard let base = raw.baseAddress else { return }
+            var inode: UInt64 = 1
+            while inode <= limit {
+                let length = fsgetpath(base, Int(PATH_MAX), &fsid, inode)
+                inode += 1
+                guard length > 0 else { continue }
+
+                var matched = true
+                var index = 0
+                while index < prefixLength {
+                    if base[index] != prefix[index] {
+                        matched = false
+                        break
+                    }
+                    index += 1
+                }
+                guard matched, base[prefixLength] == slash else { continue }
+                // 只留直接子项，否则容器里的几十万文件会被一起收进来
+                guard strchr(base.advanced(by: prefixLength + 1), nestedSlash) == nil else { continue }
+
+                results.append(String(cString: base))
+            }
+        }
+
+        let cost = String(format: "%.1f", Date().timeIntervalSince(started))
+        log("   扫了 1…\(limit) 个 inode，用时 \(cost) 秒，得到 \(results.count) 个应用容器")
+        return results
+    }
+
+    /// 逐个签发扩展 → 读容器 xattr 认领 → 命中 PosterBoard 再确认数据目录存在。
+    private static func sweepApplicationContainers(_ paths: [String], group: String, log: (String) -> Void) -> Hit? {
+        guard !paths.isEmpty else { return nil }
+        guard let sweeper = SandboxEscape.Sweeper(group: group) else {
+            log("   ⚠️ 无法建立批量签发会话（App Group 不可用）")
+            return nil
+        }
+        defer { sweeper.finish() }
+
+        var identified = 0
+        var unknown: [String] = []
+        var matched: [String] = []
+
+        for path in paths {
+            guard let identifier = sweeper.identifier(of: path) else {
+                unknown.append(path)
+                continue
+            }
+            identified += 1
+            if identifier.lowercased() == posterBoardBundleID.lowercased() {
+                matched.append(path)
+                log("   ✅ 认领到 com.apple.PosterBoard：\(path)")
+            }
+        }
+        log("   可读容器 \(identified) 个，其中 PosterBoard \(matched.count) 个，读不到标识 \(unknown.count) 个")
+
+        // xattr 读不到时兜底：直接看有没有那个数据目录（限量，避免太慢）
+        if matched.isEmpty {
+            for path in unknown.prefix(60) where sweeper.contains(path, relative: storeRelativePath) {
+                matched.append(path)
+                log("   ✅ 按数据目录命中：\(path)")
+            }
+        }
+
+        for path in matched {
+            guard sweeper.contains(path, relative: storeRelativePath) else {
+                log("   ⚠️ \(path) 里没有 \(storeRelativePath)，跳过")
+                continue
+            }
+            // 先结束批量会话（它占着交换锁），再正式缓存一次，后续写入直接复用
+            sweeper.finish()
+            _ = try? SandboxEscape.grant(path: path, group: group)
+            return Hit(path: canonical(path), source: "fsgetpath 枚举")
+        }
+        return nil
+    }
+
     // MARK: - ❶ MobileInstallation 映射
 
     /// 这些路径是固定的，不需要先知道任何 UUID；文件名变了也能扫到。
@@ -144,8 +272,11 @@ enum ContainerLocator {
         var scanned = Set<String>()
 
         for directory in mapDirectories {
-            guard (try? SandboxEscape.grant(path: directory, group: group)) != nil else {
-                log("   ⚠️ 无法为 \(directory) 申请扩展（不存在或权限不足）")
+            do {
+                _ = try SandboxEscape.grant(path: directory, group: group)
+            } catch {
+                // 区分「目录不存在」和「真的签不出扩展」，这两种下一步完全不同
+                log("   ⚠️ \(directory)：\(error.localizedDescription)")
                 continue
             }
 
@@ -305,8 +436,10 @@ enum ContainerLocator {
 
     private static func scanApplicationContainers(group: String, log: (String) -> Void) -> Hit? {
         let parent = "/var/mobile/Containers/Data/Application"
-        guard (try? SandboxEscape.grant(path: parent, group: group)) != nil else {
-            log("   无法为容器父目录申请扩展（预期行为，系统只按具体容器签发）")
+        do {
+            _ = try SandboxEscape.grant(path: parent, group: group)
+        } catch {
+            log("   父目录扩展签不出来：\(error.localizedDescription)")
             return nil
         }
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: parent) else {
