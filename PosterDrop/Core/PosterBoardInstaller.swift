@@ -83,6 +83,14 @@ final class PosterBoardInstaller {
         var dualMisses: Set<String> = []
         let dualGroup = (channel as? DirectChannel)?.group
 
+        // 整段注入共用一个 Caches 交换：每个文件/目录的签发只是改一下链接指向，
+        // 不再“移走 Caches → 写标记 → 移回”，几百个文件差别是几十秒。
+        let batchGroup = (channel as? DirectChannel)?.group
+        if let batchGroup {
+            SandboxEscape.beginBatch(group: batchGroup)
+        }
+        defer { if batchGroup != nil { SandboxEscape.endBatch() } }
+
         var injected = 0
         var failures: [String] = []
         let total = Double(items.count)

@@ -15,6 +15,12 @@
 //       文件所在的目录本身签发，仅给容器根签发还不够——这是之前写不进去的原因之一；
 //    5. 扩展数量有内核上限，缓存按路径限额、最旧的先释放；交换过程留恢复标记。
 //
+//  性能：
+//   - dlopen / dlsym 只做一次（Symbols 静态表），原来每次签发都要重载两个 dylib；
+//   - 批量签发（beginBatch / endBatch）只安装一次符号链接，之后每个目标只改链接，
+//     不再“移走 Caches → 写标记 plist → 移回”，扫描几百个容器时差别是几秒；
+//   - App Group 容器路径只解析一次。
+//
 
 import Foundation
 import CoreFoundation
@@ -49,10 +55,15 @@ enum SandboxEscape {
 
     // MARK: - 签名里的 App Group
 
+    private static var cachedEntitledGroups: [String]?
+
     /// 从自身签名读取 com.apple.security.application-groups。
     /// 用签名里的名字而不是写死，重签时换成任何 profile 允许的 group 都能工作。
     static func entitledGroups() -> [String] {
+        if let cached = cachedEntitledGroups { return cached }
+
         guard let security = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW) else {
+            cachedEntitledGroups = []
             return []
         }
         defer { dlclose(security) }
@@ -62,38 +73,110 @@ enum SandboxEscape {
 
         guard let createPtr = dlsym(security, "SecTaskCreateFromSelf"),
               let copyPtr = dlsym(security, "SecTaskCopyValueForEntitlement") else {
+            cachedEntitledGroups = []
             return []
         }
         let create = unsafeBitCast(createPtr, to: CreateFromSelf.self)
         let copyValue = unsafeBitCast(copyPtr, to: CopyValue.self)
 
-        guard let task = create(kCFAllocatorDefault) else { return [] }
+        guard let task = create(kCFAllocatorDefault) else {
+            cachedEntitledGroups = []
+            return []
+        }
         defer { Unmanaged<AnyObject>.fromOpaque(task).release() }
 
         guard let value = copyValue(task, "com.apple.security.application-groups" as CFString, nil) else {
+            cachedEntitledGroups = []
             return []
         }
         let object = Unmanaged<AnyObject>.fromOpaque(value).takeRetainedValue()
-        return (object as? [String]) ?? []
+        let groups = (object as? [String]) ?? []
+        cachedEntitledGroups = groups
+        return groups
     }
 
     /// 选一个容器真实存在的 group：优先用户填的，其次签名里的第一个可用项。
     static func usableGroup(preferred: String? = nil) -> String? {
-        let fileManager = FileManager.default
         let candidates = entitledGroups()
 
-        if let preferred, !preferred.isEmpty,
-           fileManager.containerURL(forSecurityApplicationGroupIdentifier: preferred) != nil {
+        if let preferred, !preferred.isEmpty, groupContainerPath(preferred) != nil {
             return preferred
         }
-        for group in candidates where fileManager.containerURL(forSecurityApplicationGroupIdentifier: group) != nil {
+        for group in candidates where groupContainerPath(group) != nil {
             return group
         }
         return nil
     }
 
+    /// 容器路径只解析一次：每次签发都走一遍 containerURL 是纯浪费。
+    private static var groupPaths: [String: String] = [:]
+
     static func groupContainerPath(_ group: String) -> String? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)?.path
+        if let cached = groupPaths[group] { return cached }
+        guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else {
+            return nil
+        }
+        groupPaths[group] = url.path
+        return url.path
+    }
+
+    // MARK: - 系统符号（只解析一次）
+
+    private typealias QueryCreate = @convention(c) () -> UnsafeMutableRawPointer?
+    private typealias QuerySetClass = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
+    private typealias QuerySetIDs = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
+    private typealias QuerySetFlags = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
+    private typealias QuerySetPart = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
+    private typealias QueryGetSingle = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?
+    private typealias QueryFree = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    private typealias CopyToken = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
+    private typealias XPCStringCreate = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutableRawPointer?
+    private typealias Consume = @convention(c) (UnsafePointer<CChar>?) -> Int64
+    private typealias Release = @convention(c) (Int64) -> Void
+
+    /// 第一次用到时解析，之后全部命中静态表。dlopen/dlclose 每次签发都做是旧版最大的固定开销。
+    private enum Symbols {
+
+        private static let manager: UnsafeMutableRawPointer? = dlopen(
+            "/usr/lib/system/libsystem_containermanager.dylib",
+            RTLD_NOW | RTLD_LOCAL
+        )
+
+        private static let xpc: UnsafeMutableRawPointer? = dlopen("/usr/lib/system/libxpc.dylib", RTLD_NOW)
+
+        private static func load<T>(_ name: String, in handle: UnsafeMutableRawPointer?, as type: T.Type) -> T? {
+            guard let handle, let pointer = dlsym(handle, name) else { return nil }
+            return unsafeBitCast(pointer, to: type)
+        }
+
+        static let queryCreate = load("container_query_create", in: manager, as: QueryCreate.self)
+        static let querySetClass = load("container_query_set_class", in: manager, as: QuerySetClass.self)
+        static let querySetGroups = load("container_query_set_group_identifiers", in: manager, as: QuerySetIDs.self)
+        static let querySetPart = load("container_query_operation_set_part", in: manager, as: QuerySetPart.self)
+        static let querySetFlags = load("container_query_operation_set_flags", in: manager, as: QuerySetFlags.self)
+        static let querySingle = load("container_query_get_single_result", in: manager, as: QueryGetSingle.self)
+        static let queryFree = load("container_query_free", in: manager, as: QueryFree.self)
+        static let copyToken = load("container_copy_sandbox_token", in: manager, as: CopyToken.self)
+        static let xpcString = load("xpc_string_create", in: xpc, as: XPCStringCreate.self)
+
+        static let consumePointer: UnsafeMutableRawPointer? = dlsym(
+            UnsafeMutableRawPointer(bitPattern: -2),
+            "sandbox_extension_consume"
+        )
+        static let releasePointer: UnsafeMutableRawPointer? = dlsym(
+            UnsafeMutableRawPointer(bitPattern: -2),
+            "sandbox_extension_release"
+        )
+
+        static let consume: Consume? = {
+            guard let pointer = consumePointer else { return nil }
+            return unsafeBitCast(pointer, to: Consume.self)
+        }()
+
+        static let release: Release? = {
+            guard let pointer = releasePointer else { return nil }
+            return unsafeBitCast(pointer, to: Release.self)
+        }()
     }
 
     // MARK: - 并发与缓存
@@ -129,11 +212,62 @@ enum SandboxEscape {
     }
 
     static func release(_ handle: Int64) {
-        guard handle >= 0 else { return }
-        guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "sandbox_extension_release") else { return }
-        typealias Release = @convention(c) (Int64) -> Void
-        let releaseHandle = unsafeBitCast(pointer, to: Release.self)
+        guard handle >= 0, let releaseHandle = Symbols.release else { return }
         _ = releaseHandle(handle)
+    }
+
+    // MARK: - 批量签发
+
+    /// 批量模式下常驻的交换：只安装一次符号链接，之后每次签发改一下指向。
+    private struct Batch {
+        let group: String
+        let swap: CacheSwap
+        let started: Date
+    }
+
+    private static var batch: Batch?
+    private static var batchDepth = 0
+    /// 保险：批量作用域忘了关闭时，超过这个时间就自动收尾，别让 Caches 一直是符号链接。
+    private static let batchTimeout: TimeInterval = 180
+
+    /// 开始一段批量签发。和 endBatch 必须成对（defer 最稳）。
+    static func beginBatch(group: String) {
+        gate.lock()
+        defer { gate.unlock() }
+
+        if batchDepth > 0 {
+            batchDepth += 1
+            return
+        }
+        guard let base = groupContainerPath(group),
+              let swap = try? CacheSwap(library: base + "/Library") else { return }
+        batch = Batch(group: group, swap: swap, started: Date())
+        batchDepth = 1
+    }
+
+    static func endBatch() {
+        gate.lock()
+        defer { gate.unlock() }
+
+        guard batchDepth > 0 else { return }
+        batchDepth -= 1
+        guard batchDepth == 0 else { return }
+        if let current = batch {
+            batch = nil
+            current.swap.finish()
+        }
+    }
+
+    /// 取当前可复用的交换；超时或 group 不匹配就收掉。
+    private static func activeSwap(for group: String) -> CacheSwap? {
+        guard let current = batch else { return nil }
+        if Date().timeIntervalSince(current.started) > batchTimeout {
+            batch = nil
+            batchDepth = 0
+            current.swap.finish()
+            return nil
+        }
+        return current.group == group ? current.swap : nil
     }
 
     // MARK: - 申请
@@ -161,6 +295,20 @@ enum SandboxEscape {
             throw Failure(code: -1, message: "App Group 容器不存在，签名里缺少 \(group) 的 entitlement")
         }
 
+        // 批量作用域内复用同一个交换，避免每个目标都移走/移回 Caches。
+        let shared = activeSwap(for: group)
+        let owned: CacheSwap?
+        let swap: CacheSwap
+        if let shared {
+            owned = nil
+            swap = shared
+        } else {
+            let created = try CacheSwap(library: base + "/Library")
+            owned = created
+            swap = created
+        }
+        defer { owned?.finish() }
+
         // iOS 27 先试标准 flags，iOS 26 先试备用 flags；成功的那组会记下来。
         let preferAlt = preferredAltFlags()
         let candidates: [UInt64] = preferAlt
@@ -171,8 +319,6 @@ enum SandboxEscape {
         for flags in candidates {
             let handle: Int64
             do {
-                let swap = try CacheSwap(library: base + "/Library")
-                defer { swap.finish() }
                 try swap.retarget(to: canonical)
                 handle = try queryToken(group: group, flags: flags)
             } catch let failure as Failure {
@@ -242,55 +388,25 @@ enum SandboxEscape {
 
     // MARK: - 查询
 
-    private typealias QueryCreate = @convention(c) () -> UnsafeMutableRawPointer?
-    private typealias QuerySetClass = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
-    private typealias QuerySetIDs = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
-    private typealias QuerySetFlags = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
-    private typealias QuerySetPart = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
-    private typealias QueryGetSingle = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?
-    private typealias QueryFree = @convention(c) (UnsafeMutableRawPointer?) -> Void
-    private typealias CopyToken = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
-    private typealias XPCStringCreate = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutableRawPointer?
-    private typealias Consume = @convention(c) (UnsafePointer<CChar>?) -> Int64
-
     private static let containerClassAppGroup: UInt64 = 7
     private static let partCaches: UInt64 = 3
 
     /// 发一次查询并 consume 拿到的 token。
     /// 前置条件：`<group>/Library/Caches` 此刻已是指向目标路径的符号链接，且已持有 gate。
     private static func queryToken(group: String, flags: UInt64) throws -> Int64 {
-        guard let manager = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL) else {
-            throw Failure(code: -2, message: "无法加载 libsystem_containermanager")
-        }
-        defer { dlclose(manager) }
-
-        guard let xpcLib = dlopen("/usr/lib/system/libxpc.dylib", RTLD_NOW) else {
-            throw Failure(code: -2, message: "无法加载 libxpc")
-        }
-        defer { dlclose(xpcLib) }
-
-        func symbol<T>(_ name: String, in handle: UnsafeMutableRawPointer, as type: T.Type) -> T? {
-            guard let pointer = dlsym(handle, name) else { return nil }
-            return unsafeBitCast(pointer, to: type)
-        }
-
-        guard let create = symbol("container_query_create", in: manager, as: QueryCreate.self),
-              let setClass = symbol("container_query_set_class", in: manager, as: QuerySetClass.self),
-              let setGroups = symbol("container_query_set_group_identifiers", in: manager, as: QuerySetIDs.self),
-              let setPart = symbol("container_query_operation_set_part", in: manager, as: QuerySetPart.self),
-              let setFlags = symbol("container_query_operation_set_flags", in: manager, as: QuerySetFlags.self),
-              let single = symbol("container_query_get_single_result", in: manager, as: QueryGetSingle.self),
-              let freeQuery = symbol("container_query_free", in: manager, as: QueryFree.self),
-              let copyToken = symbol("container_copy_sandbox_token", in: manager, as: CopyToken.self),
-              let xpcString = symbol("xpc_string_create", in: xpcLib, as: XPCStringCreate.self)
+        guard let create = Symbols.queryCreate,
+              let setClass = Symbols.querySetClass,
+              let setGroups = Symbols.querySetGroups,
+              let setPart = Symbols.querySetPart,
+              let setFlags = Symbols.querySetFlags,
+              let single = Symbols.querySingle,
+              let freeQuery = Symbols.queryFree,
+              let copyToken = Symbols.copyToken,
+              let xpcString = Symbols.xpcString,
+              let consume = Symbols.consume
         else {
             throw Failure(code: -2, message: "系统缺少容器查询符号，可能已被修补")
         }
-
-        guard let consumePointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "sandbox_extension_consume") else {
-            throw Failure(code: -2, message: "系统缺少 sandbox_extension_consume")
-        }
-        let consume = unsafeBitCast(consumePointer, to: Consume.self)
 
         guard let query = create() else {
             throw Failure(code: -3, message: "创建容器查询失败")

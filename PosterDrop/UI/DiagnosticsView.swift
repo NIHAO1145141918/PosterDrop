@@ -108,7 +108,7 @@ struct DiagnosticsView: View {
                 .disabled(model.containerPath.isEmpty)
             }
 
-            Text("容器路径形如 /var/mobile/Containers/Data/Application/<UUID>。自动探测会用 fsgetpath 把容器目录里的 UUID 全部反查出来（不需要 VPN，也不需要读目录权限），再逐个认领 bundle id——第一次要扫几秒。如果还是失败，去 WQFiles 的「App Data › PosterBoard」长按复制路径粘贴到上面。")
+            Text("容器路径形如 /var/mobile/Containers/Data/Application/<UUID>。自动探测会用 fsgetpath 把容器目录里的 UUID 反查出来（不需要 VPN，也不需要读目录权限），再批量认领 bundle id。第一次扫一遍卷要几秒，之后走缓存 + 增量，通常一秒内；定位成功过的路径会直接命中。如果还是失败，去 WQFiles 的「App Data › PosterBoard」长按复制路径粘贴到上面。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
