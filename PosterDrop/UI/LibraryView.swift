@@ -213,7 +213,7 @@ struct LibraryView: View {
             Text("还没有壁纸")
                 .font(.headline)
 
-            Text("点「导入壁纸」选 .tendies / .zip 或整个文件夹。\n也可以把文件拷进「文件 › 我的 \(DeviceLabel.deviceName) › PosterDrop」，再点「扫描文档」。")
+            Text("点「导入壁纸」选 .tendies / .zip 或整个文件夹。\n也可以把文件拷进「文件 › 我的 \(DeviceLabel.deviceName) › PosterDrop」，再点「扫描文档」。\n如果文件在选择器里是灰的：在「文件」里长按它 › 共享 › PosterDrop。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
