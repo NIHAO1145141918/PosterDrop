@@ -172,23 +172,41 @@ final class AppModel: ObservableObject {
 
     func importURLs(_ urls: [URL]) async {
         guard !urls.isEmpty else { return }
+        guard !isWorking else {
+            banner = .info("正在处理上一个任务，稍等一下。")
+            return
+        }
+
+        // 同一个文件被重复投递（拖放 + 选择器）时只处理一次
+        var unique: [URL] = []
+        var seen = Set<String>()
+        for url in urls where seen.insert(url.standardizedFileURL.path).inserted {
+            unique.append(url)
+        }
 
         isWorking = true
         progress = 0
         busyLabel = "正在导入壁纸…"
+        banner = nil
 
         var imported: [WallpaperItem] = []
         var failures: [String] = []
 
-        for (index, url) in urls.enumerated() {
+        LogBus.shared.append("— 开始导入 \(unique.count) 个文件 —")
+
+        for (index, url) in unique.enumerated() {
             busyLabel = "正在解析 \(url.lastPathComponent)…"
             do {
-                let item = try await store.importWallpaper(from: url)
+                let item = try await store.importWallpaper(from: url) { line in
+                    LogBus.shared.append(line)
+                }
                 imported.append(item)
             } catch {
-                failures.append("\(url.lastPathComponent)：\(error.localizedDescription)")
+                let reason = error.localizedDescription
+                failures.append("\(url.lastPathComponent)：\(reason)")
+                LogBus.shared.append("❌ \(url.lastPathComponent)：\(reason)")
             }
-            progress = Double(index + 1) / Double(urls.count)
+            progress = Double(index + 1) / Double(unique.count)
         }
 
         for item in imported {
@@ -201,22 +219,30 @@ final class AppModel: ObservableObject {
         progress = 0
         busyLabel = ""
 
-        if !imported.isEmpty {
+        if imported.isEmpty {
+            banner = .error(failures.isEmpty ? "没有导入任何壁纸。" : failures.joined(separator: "\n"))
+        } else if failures.isEmpty {
             banner = .success("已导入 \(imported.count) 个壁纸包。")
-        }
-        if !failures.isEmpty {
-            banner = .error(failures.joined(separator: "\n"))
+        } else {
+            banner = .error("已导入 \(imported.count) 个，\(failures.count) 个失败：\n" + failures.joined(separator: "\n"))
         }
     }
 
     /// 扫描“文件”App 里放进 PosterDrop 文档目录的壁纸
     func importFromDocuments() async {
-        let found = store.discoverInDocuments()
+        guard !isWorking else {
+            banner = .info("正在处理上一个任务，稍等一下。")
+            return
+        }
+
+        let scan = store.scanDocuments()
+        LogBus.shared.append("— 扫描文档目录：文件 \(scan.scannedFiles) 个，文件夹 \(scan.scannedFolders) 个，命中 \(scan.candidates.count) 个 —")
+
         let existingNames = Set(items.map { $0.fileName })
-        let fresh = found.filter { !existingNames.contains($0.lastPathComponent) }
+        let fresh = scan.candidates.filter { !existingNames.contains($0.lastPathComponent) }
 
         guard !fresh.isEmpty else {
-            banner = .info("文档目录里没有新的 .tendies / .zip 壁纸包。")
+            banner = .info("文档目录里没有新的壁纸包。\n已检查 \(scan.scannedFiles) 个文件、\(scan.scannedFolders) 个文件夹（「文件 › 我的 iPhone / iPad › PosterDrop」下都可以）。")
             return
         }
         await importURLs(fresh)

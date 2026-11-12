@@ -17,19 +17,11 @@ struct LibraryView: View {
     @State private var detailItem: WallpaperItem?
     @State private var isDropTargeted = false
 
+    /// 不再用扩展名白名单过滤选择器：`.tendies` 这类自定义类型在“文件”里
+    /// 经常被识别成 public.data 甚至没有类型，白名单会把文件灰掉选不了。
+    /// 这里放开到任意文件 / 文件夹，选完再自己校验，失败给出具体原因。
     private var importTypes: [UTType] {
-        var types: [UTType] = []
-        if let custom = UTType("com.posterdrop.tendies") {
-            types.append(custom)
-        }
-        if let custom = UTType("com.posterdrop.posterboard") {
-            types.append(custom)
-        }
-        if let byExtension = UTType(filenameExtension: "tendies") {
-            types.append(byExtension)
-        }
-        types.append(contentsOf: [.zip, .archive, .data])
-        return types
+        return [.item, .folder]
     }
 
     var body: some View {
@@ -95,8 +87,10 @@ struct LibraryView: View {
             ) { result in
                 switch result {
                 case .success(let urls):
+                    guard !urls.isEmpty else { return }
                     Task { await model.importURLs(urls) }
                 case .failure(let error):
+                    if (error as NSError).code == NSUserCancelledError { return }
                     model.banner = .error("选择文件失败：\(error.localizedDescription)")
                 }
             }
@@ -226,8 +220,8 @@ struct LibraryView: View {
                 .font(.headline)
 
             Text(DeviceLabel.isPad
-                 ? "点「导入壁纸」从“文件”里选择 .tendies 包，\n或直接把文件从“文件”App 拖进本页。"
-                 : "点「导入壁纸」从“文件”里选择 .tendies 包，\n或把文件拖进「文件 › 我的 iPhone › PosterDrop」。")
+                 ? "点「导入壁纸」从“文件”里选 .tendies 包或整个文件夹，\n也可以直接从“文件”App 拖进本页。"
+                 : "点「导入壁纸」从“文件”里选 .tendies 包或整个文件夹，\n或把文件放进「文件 › 我的 iPhone › PosterDrop」后点「扫描文档」。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
