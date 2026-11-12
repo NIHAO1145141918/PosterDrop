@@ -11,6 +11,7 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 - 自带 zip 解析，只读中央目录 + 单张预览图，大包不会因临时目录空间不足失败。
 - 自动抽取预览图、判定描述符数量；iOS 18+ 额外写一份独立的 `.Posters.<Name>App` 容器。
 - 容器定位、写入校验、缓存刷新、NeoSpring respring、运行日志都在 App 内完成。
+- **自检 / 定位是秒级的**：符号只解析一次、批量签发只装一次 Caches 符号链接、定位结果落缓存，第二次自检基本一步命中。
 
 > 仅供安全研究与个人设备定制使用。请只在你自己拥有或获授权管理的设备上运行。
 
@@ -151,15 +152,15 @@ PosterDrop 做四件事：
 
 ---
 
-## 三、为什么 2.0 把 Airlift 删干净了
+## 三、为什么把 Airlift 整条删掉了
 
-1.0 – 1.5 有两套底层同时存在：Airlift（配对 + RSD）和 worse_query。结果是：
+早期版本里有两套底层同时存在：Airlift（配对 + RSD）和 worse_query。结果是：
 
 - 没有配对记录时能走直连，但只要直连失败就会回退到隧道，日志里到处是 Airlift；
 - 隧道需要 LocalDevVPN，且 iOS 27.2 beta 3 起 AirTraffic 已被 Apple 修补；
 - 引入 127 MB 的 Rust 静态库，IPA 体积、构建步骤、故障面都翻倍。
 
-2.0 的做法是只保留 worse_query：删除 `AirliftFFI`、配对页、配对存储、隧道检测、TunnelChannel 和所有 `al_*` 调用。
+现在的做法是只保留 worse_query：删除 `AirliftFFI`、配对页、配对存储、隧道检测、TunnelChannel 和所有 `al_*` 调用。
 现在打开 App、导入、注入、respring 的整条链路里没有任何一条需要 VPN 或配对文件。
 
 ---
@@ -236,7 +237,7 @@ xcodegen generate
 ## 七、常见问题
 
 **Q：为什么不需要 VPN 和配对文件了？**
-A：2.0 的底层是 worse_query，靠 App Group 容器的 `Library/Caches` 符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成。旧版的 Airlift 隧道（需要配对 + LocalDevVPN）已经整条删除。
+A：底层是 worse_query，靠 App Group 容器的 `Library/Caches` 符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成。旧版的 Airlift 隧道（需要配对 + LocalDevVPN）已经整条删除。
 
 **Q：提示「签名里没有可用的 App Group」**
 A：重签时没勾 App Groups。用轻松签 / ESign 勾选一个 group 重签；免费 Personal Team 也可以。
