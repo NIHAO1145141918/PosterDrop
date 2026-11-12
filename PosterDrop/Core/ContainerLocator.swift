@@ -324,7 +324,10 @@ enum ContainerLocator {
 
         let cost = String(format: "%.1f", Date().timeIntervalSince(started))
         log("   扫了 \(total) 个 object id，用时 \(cost) 秒，得到 \(hits.count) 个容器")
-        saveScanCache(Array(hits), limit: probe.limit)
+        // 增量扫描只覆盖新 id，保存时要把旧缓存合并进来
+        let previous = (UserDefaults.standard.array(forKey: ScanCache.paths) as? [String]) ?? []
+        let merged = Array(Set(previous + Array(hits)))
+        saveScanCache(merged, limit: probe.limit)
         return Array(hits)
     }
 
@@ -339,7 +342,8 @@ enum ContainerLocator {
         var found = 0
         var resolved = 0
         let samples = 2000
-        let lower = max(1, probe.limit / 2)
+        // 在整个 id 区间均匀抽样：老 App 的容器 id 可能远低于上界，只抽上半段会漏判
+        let lower: Int64 = 1
 
         buffer.withUnsafeMutableBufferPointer { raw in
             guard let base = raw.baseAddress else { return }

@@ -78,23 +78,10 @@ final class PosterBoardInstaller {
         emit(log, "🎯 目标容器：\(container)")
         emit(log, "🔌 写入通道：\(channel.label)")
         emit(log, "🧩 数据结构版本：\(options.structVersion)")
-
-        // iOS 18+ 的 .Posters.<Name>App 是独立容器，先把它们定位好（只做一次）
+        // iOS 18+ 的 .Posters.<Name>App 是独立容器，按需定位（只有真的遇到这类壁纸才查）
         var dualChannels: [String: DirectChannel] = [:]
-        if options.dualInject, let direct = channel as? DirectChannel {
-            let pairs = [
-                ("com.apple.WallpaperKit.CollectionsPoster", "com.apple.Posters.CollectionsPosterApp"),
-                ("com.apple.MercuryPoster", "com.apple.Posters.MercuryPosterApp")
-            ]
-            for (legacy, modern) in pairs {
-                if let hit = ContainerLocator.find(bundleID: modern, group: direct.group, manual: nil, log: { line in
-                    emit(log, "  · " + line)
-                }) {
-                    dualChannels[legacy] = DirectChannel(containerPath: hit.path, group: direct.group)
-                }
-            }
-            emit(log, "  · 新容器定位：\(dualChannels.keys.sorted().joined(separator: ", "))")
-        }
+        var dualMisses: Set<String> = []
+        let dualGroup = (channel as? DirectChannel)?.group
 
         var injected = 0
         var failures: [String] = []
@@ -145,7 +132,25 @@ final class PosterBoardInstaller {
                     // 定位不到（旧系统没有这个 App）就跳过，不影响主注入。
                     if options.dualInject,
                        let modernID = Self.modernBundleIdentifier(for: extensionID),
-                       let dual = dualChannels[extensionID] {
+                       let dualGroup,
+                       !dualMisses.contains(extensionID) {
+                        var dual = dualChannels[extensionID]
+                        if dual == nil {
+                            let hit = try? await runOffMain {
+                                ContainerLocator.find(bundleID: modernID, group: dualGroup, manual: nil, log: { line in
+                                    emit(log, "  · " + line)
+                                })
+                            }
+                            if let hit {
+                                dual = DirectChannel(containerPath: hit.path, group: dualGroup)
+                                dualChannels[extensionID] = dual
+                                emit(log, "    ↳ 定位到 \(modernID)：\(hit.path)")
+                            } else {
+                                dualMisses.insert(extensionID)
+                                emit(log, "    ↳ 没有找到 \(modernID) 的容器，跳过双写")
+                            }
+                        }
+                        guard let dual else { continue }
                         let modernParent = "\(dual.containerPath)/Library/Application Support/PRBPosterExtensionDataStore/\(options.structVersion)/Extensions/\(modernID)/descriptors"
                         do {
                             try await runOffMain {
