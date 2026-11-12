@@ -57,26 +57,33 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
 
     /// 只做探测，不安装：给诊断页用。
     static func probe(group: String?, manualContainer: String?) -> ProbeResult {
+        let lock = NSLock()
         var lines: [String] = []
+        /// 扫描进度来自别的线程，统一加锁再写
+        func emit(_ line: String) {
+            lock.lock()
+            lines.append(line)
+            lock.unlock()
+        }
 
         let groups = SandboxEscape.entitledGroups()
-        lines.append("签名内 App Groups：\(groups.isEmpty ? "无" : groups.joined(separator: ", "))")
+        emit("签名内 App Groups：\(groups.isEmpty ? "无" : groups.joined(separator: ", "))")
 
         guard let group = SandboxEscape.usableGroup(preferred: group) else {
-            lines.append("❌ 没有可用的 App Group 容器")
-            lines.append("worse_query 必须有 com.apple.security.application-groups。")
-            lines.append("用 轻松签 / ESign / SideStore 重签时勾选 App Groups（免费 Personal Team 也能签）。")
+            emit("❌ 没有可用的 App Group 容器")
+            emit("worse_query 必须有 com.apple.security.application-groups。")
+            emit("用 轻松签 / ESign / SideStore 重签时勾选 App Groups（免费 Personal Team 也能签）。")
             return ProbeResult(report: lines.joined(separator: "\n"), containerPath: nil)
         }
-        lines.append("使用的 App Group：\(group)")
-        lines.append("系统：iOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
+        emit("使用的 App Group：\(group)")
+        emit("系统：iOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
 
         do {
-            let channel = try locate(group: group, manualContainer: manualContainer, log: { lines.append($0) })
-            lines.append("✅ 容器可用，可以直接应用壁纸")
+            let channel = try locate(group: group, manualContainer: manualContainer, log: emit)
+            emit("✅ 容器可用，可以直接应用壁纸")
             return ProbeResult(report: lines.joined(separator: "\n"), containerPath: channel.containerPath)
         } catch {
-            lines.append("❌ \(error.localizedDescription)")
+            emit("❌ \(error.localizedDescription)")
             return ProbeResult(report: lines.joined(separator: "\n"), containerPath: nil)
         }
     }
