@@ -24,7 +24,7 @@ jobs:
     # "not acquired by Runner of type hosted"）。这不是配置错误：
     # 直接重跑同一次 workflow 就行。macos-14 / macos-15-intel 这些标签
     # 在这个账号上不可用（会报 configuration not supported），不要换。
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 45
 
     steps:
