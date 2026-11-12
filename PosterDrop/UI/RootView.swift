@@ -2,7 +2,7 @@
 //  RootView.swift
 //  PosterDrop
 //
-//  三个页签 + 全局 respring 遮罩。
+//  两个页签 + 全局 respring 遮罩。
 //
 
 import SwiftUI
@@ -41,17 +41,11 @@ struct RootView: View {
                 }
                 .tag(0)
 
-            PairingView()
-                .tabItem {
-                    Label("配对", systemImage: "link.badge.plus")
-                }
-                .tag(1)
-
             DiagnosticsView()
                 .tabItem {
                     Label("诊断", systemImage: "wrench.and.screwdriver")
                 }
-                .tag(2)
+                .tag(1)
         }
     }
 }

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- worse_query 的跳板：containermanagerd 只对 App Group 容器签发扩展。
+	     重签时如果 profile 用的是别的 group，运行时会自动读签名里的实际值。 -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.posterdrop.shared</string>
+	</array>
+</dict>
+</plist>

@@ -2,11 +2,11 @@
 //  FileChannel.swift
 //  PosterDrop
 //
-//  写入通道抽象：
-//    · TunnelChannel —— 走配对隧道（Airlift），iOS 18+ 通用，需要配对记录；
-//    · DirectChannel —— 走沙箱扩展（直连），不需要配对，但要系统存在签发缺陷。
+//  写入通道：只有一条——worse_query 签发的沙箱扩展。
 //
-//  两者对上层是同一套接口，注入逻辑不关心文件到底怎么落到设备上。
+//  worse_query 的一条实测结论（27.0.1）：扩展只覆盖签发时指定的那一个目录，
+//  “给容器根签发”并不足以在两三层之下创建文件。所以这里的做法是：
+//  每建一层目录、每写一层文件，都先给文件真正所在的目录单独签发一次。
 //
 
 import Foundation
@@ -14,8 +14,8 @@ import Foundation
 protocol FileChannel: AnyObject {
     /// 展示用名称
     var label: String { get }
-    /// 是否能写 /var/mobile/Library/Preferences（只有隧道可以）
-    var supportsGlobalPreferences: Bool { get }
+    /// 签发扩展用的 App Group
+    var group: String { get }
 
     /// 把一个本地目录整体写成 parent/destName
     func injectFolder(folder: String, parent: String, destName: String) throws
@@ -23,38 +23,12 @@ protocol FileChannel: AnyObject {
     func writeTree(source: String, target: String) throws
 }
 
-// MARK: - 隧道通道
-
-final class TunnelChannel: FileChannel {
-
-    let pairingPath: String
-
-    init(pairingPath: String) {
-        self.pairingPath = pairingPath
-    }
-
-    var label: String { "配对隧道" }
-    var supportsGlobalPreferences: Bool { true }
-
-    func injectFolder(folder: String, parent: String, destName: String) throws {
-        try Airlift.injectFolder(pairingPath: pairingPath, folder: folder, parent: parent, destName: destName)
-    }
-
-    func writeTree(source: String, target: String) throws {
-        try Airlift.writeDirectory(pairingPath: pairingPath, source: source, target: target)
-    }
-}
-
-// MARK: - 直连通道
-
 /// 自检结果：报告文本 + 真正可用的容器路径（有就顺手存下来）。
 struct ProbeResult: Sendable {
     let report: String
     let containerPath: String?
 }
 
-/// 借 App Group 的沙箱扩展直接写 PosterBoard 容器。
-/// 每次落盘前都确保目标路径（或最近的已存在父目录）已被扩展覆盖。
 final class DirectChannel: FileChannel, @unchecked Sendable {
 
     let containerPath: String
@@ -65,8 +39,7 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
         self.group = group
     }
 
-    var label: String { "直连（App Group \(group)）" }
-    var supportsGlobalPreferences: Bool { false }
+    var label: String { "worse_query（App Group \(group)）" }
 
     // MARK: 定位
 
@@ -74,7 +47,7 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
         guard let hit = ContainerLocator.findPosterBoard(group: group, manual: manualContainer, log: log) else {
             throw SandboxEscape.Failure(
                 code: -11,
-                message: "没有找到 PosterBoard 容器：去 WQFiles 的「App Data › PosterBoard」长按复制容器路径，粘贴到诊断页的输入框再试"
+                message: "没有找到 PosterBoard 容器。可以先在诊断页点「自检通道」看卡在哪一步；仍然失败时，用 WQFiles 打开 App Data › PosterBoard，复制容器路径填到诊断页。"
             )
         }
         log("🎯 PosterBoard 容器（\(hit.source)）：\(hit.path)")
@@ -90,11 +63,12 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
 
         guard let group = SandboxEscape.usableGroup(preferred: group) else {
             lines.append("❌ 没有可用的 App Group 容器")
-            lines.append("这条通道要求签名里带 com.apple.security.application-groups。")
-            lines.append("用 轻松签 / ESign 重签时勾选 App Groups，或用一个允许 App Groups 的 profile（含免费 Personal Team）。")
+            lines.append("worse_query 必须有 com.apple.security.application-groups。")
+            lines.append("用 轻松签 / ESign / SideStore 重签时勾选 App Groups（免费 Personal Team 也能签）。")
             return ProbeResult(report: lines.joined(separator: "\n"), containerPath: nil)
         }
         lines.append("使用的 App Group：\(group)")
+        lines.append("系统：iOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
 
         do {
             let channel = try locate(group: group, manualContainer: manualContainer, log: { lines.append($0) })
@@ -106,58 +80,150 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
         }
     }
 
-    // MARK: 写入
+    // MARK: 目录与授权
 
-    /// 确保目录存在且已被扩展覆盖。
-    private func prepareDirectory(_ path: String) throws {
+    /// 给目录（或文件）本身签发扩展；写操作会额外做探针验证。
+    /// 不在本地另做缓存：SandboxEscape 有全局上限和淘汰机制，这里的二次缓存会让
+    /// “以为有权限、实际扩展已被释放”的情况发生。
+    private func ensureGranted(_ path: String, writable: Bool) throws {
+        let canonical = SandboxEscape.canonicalPath(path)
+        do {
+            _ = try SandboxEscape.grant(path: canonical, group: group, requireWrite: writable)
+        } catch let failure as SandboxEscape.Failure {
+            throw SandboxEscape.Failure(code: failure.code, message: "无法获得 \(canonical) 的访问权限：\(failure.message)")
+        }
+    }
+
+    /// 保证目录存在，并且“这个目录本身”已经被扩展覆盖（可以往里写文件）。
+    private func ensureDirectory(_ path: String) throws {
+        let canonical = SandboxEscape.canonicalPath(path)
         let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: path) {
-            _ = try? SandboxEscape.grant(path: path, group: group)
+
+        var missing: [String] = []
+        var current = canonical
+        while !fileManager.fileExists(atPath: current), current != "/" {
+            missing.append(current)
+            current = (current as NSString).deletingLastPathComponent
+        }
+
+        if missing.isEmpty {
+            try ensureGranted(canonical, writable: true)
             return
         }
-        // 不存在的部分：先授权最近的已存在祖先，再逐级创建
-        guard SandboxEscape.grantNearestExisting(path: path, group: group) != nil else {
-            throw SandboxEscape.Failure(code: -12, message: "无法为 \(path) 申请沙箱扩展")
+
+        try ensureGranted(current, writable: true)
+        for directory in missing.reversed() {
+            do {
+                try fileManager.createDirectory(atPath: directory, withIntermediateDirectories: false)
+            } catch {
+                throw SandboxEscape.Failure(code: -12, message: "创建目录 \(directory) 失败：\(error.localizedDescription)")
+            }
+            // 新建的目录需要自己的扩展，下一层才能在它里面创建东西
+            try ensureGranted(directory, writable: true)
         }
-        do {
-            try fileManager.createDirectory(atPath: path, withIntermediateDirectories: true)
-        } catch {
-            throw SandboxEscape.Failure(code: -12, message: "创建目录失败：\(error.localizedDescription)")
-        }
-        _ = try? SandboxEscape.grant(path: path, group: group)
     }
+
+    // MARK: 写入
 
     func injectFolder(folder: String, parent: String, destName: String) throws {
         let fileManager = FileManager.default
-        try prepareDirectory(parent)
+        try ensureDirectory(parent)
 
-        let destination = parent + "/" + destName
+        let destination = SandboxEscape.canonicalPath(parent) + "/" + destName
         if fileManager.fileExists(atPath: destination) {
-            try? fileManager.removeItem(atPath: destination)
+            // 目录树里每一层都要写权限才能删；先改名放到一边，失败也不影响本次写入
+            let old = SandboxEscape.canonicalPath(parent) + "/.pd-old-" + UUID().uuidString
+            try? fileManager.moveItem(atPath: destination, toPath: old)
+            if fileManager.fileExists(atPath: old) {
+                try? fileManager.removeItem(atPath: old)
+            }
         }
-        do {
-            try fileManager.copyItem(atPath: folder, toPath: destination)
-        } catch {
-            throw SandboxEscape.Failure(code: -13, message: "写入 \(destination) 失败：\(error.localizedDescription)")
+
+        try ensureDirectory(destination)
+        try copyContents(from: folder, to: destination)
+
+        let sourceCount = countFiles(in: folder)
+        let targetCount = countFiles(in: destination)
+        guard sourceCount == targetCount else {
+            throw SandboxEscape.Failure(
+                code: -13,
+                message: "写入不完整：源 \(sourceCount) 个文件，目标 \(targetCount) 个（\(destination)）"
+            )
         }
     }
 
     func writeTree(source: String, target: String) throws {
         let fileManager = FileManager.default
-        try prepareDirectory(target)
+        try ensureDirectory(target)
 
         let items = try fileManager.contentsOfDirectory(atPath: source)
         for item in items {
             let from = source + "/" + item
-            let to = target + "/" + item
+            let to = SandboxEscape.canonicalPath(target) + "/" + item
             if fileManager.fileExists(atPath: to) {
                 try? fileManager.removeItem(atPath: to)
             }
-            do {
-                try fileManager.copyItem(atPath: from, toPath: to)
-            } catch {
-                throw SandboxEscape.Failure(code: -13, message: "写入 \(to) 失败：\(error.localizedDescription)")
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: from, isDirectory: &isDirectory) else { continue }
+            if isDirectory.boolValue {
+                try ensureDirectory(to)
+                try copyContents(from: from, to: to)
+            } else {
+                try copyFile(from: from, to: to)
             }
         }
+    }
+
+    private func copyContents(from source: String, to destination: String) throws {
+        let fileManager = FileManager.default
+        let items = try fileManager.contentsOfDirectory(atPath: source)
+        for item in items {
+            let from = source + "/" + item
+            let to = destination + "/" + item
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: from, isDirectory: &isDirectory) else { continue }
+            if isDirectory.boolValue {
+                try ensureDirectory(to)
+                try copyContents(from: from, to: to)
+            } else {
+                try copyFile(from: from, to: to)
+            }
+        }
+    }
+
+    private func copyFile(from source: String, to destination: String) throws {
+        let fileManager = FileManager.default
+        let parent = (destination as NSString).deletingLastPathComponent
+        try ensureGranted(parent, writable: true)
+        do {
+            try? fileManager.removeItem(atPath: destination)
+            try fileManager.copyItem(atPath: source, toPath: destination)
+        } catch {
+            // 扩展可能在这一轮被淘汰或刚好失效：重新签发一次再写
+            if let retry = try? SandboxEscape.grant(path: parent, group: group, requireWrite: true) {
+                _ = retry
+                do {
+                    try? fileManager.removeItem(atPath: destination)
+                    try fileManager.copyItem(atPath: source, toPath: destination)
+                    return
+                } catch {
+                    // 落到下面统一报错
+                }
+            }
+            throw SandboxEscape.Failure(code: -13, message: "写入 \(destination) 失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func countFiles(in root: String) -> Int {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(atPath: root) else { return 0 }
+        var count = 0
+        for case let relative as String in enumerator {
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: root + "/" + relative, isDirectory: &isDirectory), !isDirectory.boolValue {
+                count += 1
+            }
+        }
+        return count
     }
 }

@@ -154,14 +154,10 @@ struct LibraryView: View {
             }
 
             HStack(spacing: 6) {
-                Image(systemName: model.directEnabled
-                      ? "bolt.horizontal.circle.fill"
-                      : (model.hasPairing ? "checkmark.seal.fill" : "bolt.horizontal.circle"))
+                Image(systemName: "bolt.horizontal.circle.fill")
                     .font(.caption)
-                    .foregroundColor(model.directEnabled ? Theme.accent : (model.hasPairing ? .green : Theme.accent))
-                Text(model.directEnabled
-                     ? "直连通道已启用，无需配对、无需 VPN"
-                     : (model.hasPairing ? "配对记录已就绪" : "没有配对记录时会自动走直连，不需要 VPN"))
+                    .foregroundColor(Theme.accent)
+                Text("worse_query 直连 · 无需配对、无需 VPN")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -231,9 +227,9 @@ struct LibraryView: View {
             Text("使用步骤")
                 .font(.subheadline.weight(.semibold))
 
-            stepRow(index: 1, title: "连接回环隧道", detail: "打开 LocalDevVPN / WireGuard，连接后地址为 10.7.0.1。")
-            stepRow(index: 2, title: "准备配对记录", detail: "“配对”页导入配对文件，或在 iOS 27+ 直接本机配对。")
-            stepRow(index: 3, title: "导入并应用", detail: "选中壁纸 → 应用所选 → 自动 respring，随后在锁屏墙纸里选用。")
+            stepRow(index: 1, title: "签名带上 App Group", detail: "重签时勾选一个 App Groups（免费 Personal Team 也能签）。整个底层就靠这个 group 换沙箱扩展。")
+            stepRow(index: 2, title: "导入壁纸包", detail: "选 .tendies / .zip 或整个文件夹；不需要 VPN，也不需要配对文件。")
+            stepRow(index: 3, title: "应用并 respring", detail: "选中壁纸 → 应用所选 → 自动重启桌面，随后在锁屏墙纸里选用。")
         }
         .card()
     }

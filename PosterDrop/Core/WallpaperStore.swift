@@ -88,10 +88,10 @@ final class WallpaperStore {
 
         var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: source.path, isDirectory: &isDirectory) else {
-            throw AirliftError.failed("文件不存在：\(source.lastPathComponent)")
+            throw PosterDropError.failed("文件不存在：\(source.lastPathComponent)")
         }
         guard manager.isReadableFile(atPath: source.path) else {
-            throw AirliftError.failed("没有读取「\(source.lastPathComponent)」的权限。请先在“文件”App 里把它下载到本机（长按 › 下载），再导入。")
+            throw PosterDropError.failed("没有读取「\(source.lastPathComponent)」的权限。请先在“文件”App 里把它下载到本机（长按 › 下载），再导入。")
         }
 
         var fileName = source.lastPathComponent
@@ -190,15 +190,15 @@ final class WallpaperStore {
             } catch {
                 try? manager.removeItem(at: temporary)
                 let reason = coordinatedError?.localizedDescription ?? error.localizedDescription
-                throw AirliftError.failed("拷贝「\(source.lastPathComponent)」失败：\(reason)")
+                throw PosterDropError.failed("拷贝「\(source.lastPathComponent)」失败：\(reason)")
             }
         } else if let coordinatedError {
             try? manager.removeItem(at: temporary)
-            throw AirliftError.failed("读取「\(source.lastPathComponent)」失败：\(coordinatedError.localizedDescription)")
+            throw PosterDropError.failed("读取「\(source.lastPathComponent)」失败：\(coordinatedError.localizedDescription)")
         }
 
         guard manager.fileExists(atPath: temporary.path) else {
-            throw AirliftError.failed("拷贝「\(source.lastPathComponent)」后文件不见了，可能源文件已被移动。")
+            throw PosterDropError.failed("拷贝「\(source.lastPathComponent)」后文件不见了，可能源文件已被移动。")
         }
 
         do {
@@ -206,7 +206,7 @@ final class WallpaperStore {
             try manager.moveItem(at: temporary, to: destination)
         } catch {
             try? manager.removeItem(at: temporary)
-            throw AirliftError.failed("保存「\(destination.lastPathComponent)」失败：\(error.localizedDescription)")
+            throw PosterDropError.failed("保存「\(destination.lastPathComponent)」失败：\(error.localizedDescription)")
         }
     }
 

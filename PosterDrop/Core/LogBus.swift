@@ -2,7 +2,7 @@
 //  LogBus.swift
 //  PosterDrop
 //
-//  全局日志总线。Rust 回调可能来自任意线程，统一切回主线程再发布。
+//  全局日志总线。扫描/注入回调可能来自任意线程，统一切回主线程再发布。
 //
 
 import Foundation

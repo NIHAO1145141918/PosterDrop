@@ -12,7 +12,6 @@ struct PosterDropApp: App {
     @StateObject private var model = AppModel()
 
     init() {
-        Airlift.bootstrap()
         LogBus.shared.append("PosterDrop 启动")
         LogBus.shared.append("系统版本：iOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
     }
@@ -24,9 +23,7 @@ struct PosterDropApp: App {
                 .onOpenURL { url in
                     model.handleIncoming(url: url)
                 }
-                .onAppear {
-                    model.refreshPairingState()
-                }
+
         }
     }
 }

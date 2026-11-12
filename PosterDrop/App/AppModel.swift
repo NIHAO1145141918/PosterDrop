@@ -4,6 +4,8 @@
 //
 //  全局状态与业务编排：导入 → 解析 → 注入 → 刷新 → respring。
 //
+//  这一版只有一条底层：worse_query 的 App Group 沙箱扩展。没有配对、没有隧道、没有 VPN。
+//
 
 import Foundation
 import UIKit
@@ -34,7 +36,6 @@ final class AppModel: ObservableObject {
         static let dualInject = "posterdrop.dualInject"
         static let manualVersion = "posterdrop.manualStructVersion"
         static let autoVersion = "posterdrop.autoStructVersion"
-        static let direct = "posterdrop.directChannel"
         static let appGroup = "posterdrop.appGroupID"
     }
 
@@ -51,12 +52,11 @@ final class AppModel: ObservableObject {
     @Published var lastReport: InstallReport?
     @Published var isRespringing = false
 
-    // MARK: 配对 / 容器
+    // MARK: 容器
 
     @Published var containerPath: String = UserDefaults.standard.string(forKey: Keys.container) ?? "" {
         didSet { UserDefaults.standard.set(containerPath, forKey: Keys.container) }
     }
-    @Published var pairingSize: Int = 0
 
     // MARK: 选项
 
@@ -73,11 +73,7 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(manualStructVersion, forKey: Keys.manualVersion) }
     }
 
-    /// 直连通道（沙箱扩展）：不需要配对，但依赖系统签发缺陷
-    @Published var directEnabled: Bool {
-        didSet { UserDefaults.standard.set(directEnabled, forKey: Keys.direct) }
-    }
-    /// 直连通道的跳板 App Group；留空表示用自身容器
+    /// worse_query 的跳板 App Group；留空表示读签名里的第一个可用项
     @Published var appGroupID: String {
         didSet { UserDefaults.standard.set(appGroupID, forKey: Keys.appGroup) }
     }
@@ -85,7 +81,6 @@ final class AppModel: ObservableObject {
     @Published var directStatus: String = ""
 
     private let store = WallpaperStore.shared
-    private let pairingStore = PairingStore.shared
     private let installer = PosterBoardInstaller.shared
 
     init() {
@@ -94,13 +89,11 @@ final class AppModel: ObservableObject {
         SandboxEscape.recoverPendingSwaps()
 
         autoStructVersion = UserDefaults.standard.object(forKey: Keys.autoVersion) as? Bool ?? true
-        directEnabled = UserDefaults.standard.object(forKey: Keys.direct) as? Bool ?? false
         appGroupID = UserDefaults.standard.string(forKey: Keys.appGroup) ?? ""
         let storedVersion = UserDefaults.standard.object(forKey: Keys.manualVersion) as? Int ?? 61
         manualStructVersion = storedVersion
 
         items = store.loadLibrary()
-        refreshPairingState()
     }
 
     // MARK: - 派生状态
@@ -113,31 +106,12 @@ final class AppModel: ObservableObject {
         return selectedItems.count
     }
 
-    var hasPairing: Bool {
-        return pairingSize > 0
-    }
-
     var effectiveStructVersion: Int {
         if autoStructVersion {
             let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
             return major >= 17 ? 61 : 59
         }
         return manualStructVersion
-    }
-
-    var pairingPath: String {
-        return pairingStore.activePath
-    }
-
-    func refreshPairingState() {
-        pairingSize = pairingStore.activePairingSize
-        if pairingSize == 0 {
-            // 尝试自动采纳 Documents 里已有的配对文件
-            if let candidate = pairingStore.discoveredPairingFiles().first,
-               (try? pairingStore.adopt(url: candidate.url)) != nil {
-                pairingSize = pairingStore.activePairingSize
-            }
-        }
     }
 
     // MARK: - 壁纸库操作
@@ -250,18 +224,10 @@ final class AppModel: ObservableObject {
 
     func handleIncoming(url: URL) {
         let fileExtension = url.pathExtension.lowercased()
-        if ["mobiledevicepairing", "mobilepair"].contains(fileExtension)
-            || (fileExtension == "plist" && url.lastPathComponent.lowercased().contains("pair")) {
-            do {
-                let size = try pairingStore.adopt(url: url)
-                refreshPairingState()
-                banner = .success("已导入配对记录（\(size) 字节）。")
-            } catch {
-                banner = .error(error.localizedDescription)
-            }
+        if ["mobiledevicepairing", "mobilepair"].contains(fileExtension) {
+            banner = .info("这一版不再需要配对文件：壁纸直接通过 worse_query 沙箱扩展写入。")
             return
         }
-
         Task {
             await importURLs([url])
         }
@@ -280,23 +246,6 @@ final class AppModel: ObservableObject {
             return
         }
 
-        refreshPairingState()
-
-        // 没有配对记录时隧道根本没法用，直接走直连（不需要 VPN）
-        let useDirect = directEnabled || !hasPairing
-        let pairing = pairingPath
-
-        if !useDirect {
-            guard hasPairing else {
-                banner = .error("还没有可用的配对记录。请先到「配对」页导入配对文件，或在 iOS 27+ 使用本机配对；也可以在「诊断 › 直连通道」里改用直连模式。")
-                return
-            }
-            guard FileManager.default.fileExists(atPath: pairing) else {
-                banner = .error("配对文件不存在，请重新导入。")
-                return
-            }
-        }
-
         persistLibrary()
 
         isWorking = true
@@ -304,34 +253,16 @@ final class AppModel: ObservableObject {
         lastReport = nil
         LogBus.shared.clear()
         LogBus.shared.append("==== PosterDrop 开始注入 ====")
-        LogBus.shared.append(useDirect ? "通道：直连（沙箱扩展）" : "通道：配对隧道 \(pairing)")
+        LogBus.shared.append("底层：worse_query 沙箱扩展（无需配对 / 无需 VPN）")
 
         do {
-            var container = containerPath.trimmingCharacters(in: .whitespacesAndNewlines)
-            var detectedFresh = false
-            let channel: FileChannel
+            busyLabel = "正在定位 PosterBoard 容器…"
+            let channel = try await locateDirectChannel()
+            containerPath = channel.containerPath
+            UserDefaults.standard.set(channel.containerPath, forKey: Keys.container)
 
-            if useDirect {
-                busyLabel = "正在申请沙箱扩展…"
-                let direct = try await locateDirectChannel()
-                channel = direct
-                container = direct.containerPath
-                containerPath = container
-                UserDefaults.standard.set(container, forKey: Keys.container)
-                LogBus.shared.append("通道：\(direct.label)")
-                LogBus.shared.append("PosterBoard 容器：\(container)")
-                detectedFresh = true
-            } else {
-                channel = TunnelChannel(pairingPath: pairing)
-                if container.isEmpty {
-                    busyLabel = "正在探测 PosterBoard 容器…"
-                    container = try await installer.detectContainer(pairingPath: pairing)
-                    containerPath = container
-                    UserDefaults.standard.set(container, forKey: Keys.container)
-                    LogBus.shared.append("PosterBoard 容器：\(container)")
-                    detectedFresh = true
-                }
-            }
+            LogBus.shared.append("通道：\(channel.label)")
+            LogBus.shared.append("PosterBoard 容器：\(channel.containerPath)")
 
             let options = InstallOptions(
                 structVersion: effectiveStructVersion,
@@ -340,36 +271,13 @@ final class AppModel: ObservableObject {
             )
 
             busyLabel = "正在注入 \(targets.count) 张壁纸…"
-
-            do {
-                let report = try await performInstall(
-                    targets: targets,
-                    container: container,
-                    channel: channel,
-                    options: options
-                )
-                finishInstall(report)
-            } catch {
-                // 缓存的容器路径可能已经失效（重装 App / 系统更新），重新探测后重试一次
-                guard !detectedFresh, !useDirect else { throw error }
-
-                LogBus.shared.append("⚠️ 首次注入失败，重新探测容器后重试：\(error.localizedDescription)")
-                busyLabel = "容器路径可能已失效，正在重新探测…"
-
-                let freshContainer = try await installer.detectContainer(pairingPath: pairing)
-                containerPath = freshContainer
-                UserDefaults.standard.set(freshContainer, forKey: Keys.container)
-                LogBus.shared.append("新的容器路径：\(freshContainer)")
-
-                busyLabel = "正在重试注入…"
-                let report = try await performInstall(
-                    targets: targets,
-                    container: freshContainer,
-                    channel: channel,
-                    options: options
-                )
-                finishInstall(report)
-            }
+            let report = try await performInstall(
+                targets: targets,
+                container: channel.containerPath,
+                channel: channel,
+                options: options
+            )
+            finishInstall(report)
         } catch {
             isWorking = false
             busyLabel = ""
@@ -418,38 +326,19 @@ final class AppModel: ObservableObject {
 
     func detectContainer() async {
         isWorking = true
-        busyLabel = "正在探测 PosterBoard 容器…"
+        busyLabel = "正在定位 PosterBoard 容器…"
         defer {
             isWorking = false
             busyLabel = ""
         }
 
-        refreshPairingState()
-        if directEnabled || !hasPairing {
-            do {
-                let channel = try await locateDirectChannel()
-                containerPath = channel.containerPath
-                UserDefaults.standard.set(channel.containerPath, forKey: Keys.container)
-                banner = .success("已通过直连通道定位 PosterBoard 容器。")
-            } catch {
-                banner = .error("直连探测失败：\(error.localizedDescription)")
-            }
-            return
-        }
-
-        refreshPairingState()
-        guard hasPairing else {
-            banner = .error("请先导入配对记录，或改用直连通道。")
-            return
-        }
-
         do {
-            let container = try await installer.detectContainer(pairingPath: pairingPath)
-            containerPath = container
-            UserDefaults.standard.set(container, forKey: Keys.container)
+            let channel = try await locateDirectChannel()
+            containerPath = channel.containerPath
+            UserDefaults.standard.set(channel.containerPath, forKey: Keys.container)
             banner = .success("已定位 PosterBoard 容器。")
         } catch {
-            banner = .error("探测失败：\(error.localizedDescription)\n请确认 LocalDevVPN 已连接、设备已解锁。")
+            banner = .error("定位失败：\(error.localizedDescription)")
         }
     }
 
@@ -461,50 +350,29 @@ final class AppModel: ObservableObject {
             busyLabel = ""
         }
 
-        let channel: FileChannel
-        var container = containerPath
+        do {
+            let channel = try await locateDirectChannel()
+            if containerPath.isEmpty { containerPath = channel.containerPath }
 
-        refreshPairingState()
-        if directEnabled || !hasPairing {
-            do {
-                let direct = try await locateDirectChannel()
-                channel = direct
-                if container.isEmpty { container = direct.containerPath }
-            } catch {
-                banner = .error("直连通道不可用：\(error.localizedDescription)")
-                return
+            let ok = await installer.refreshCache(
+                containerPath: channel.containerPath,
+                channel: channel,
+                log: { line in LogBus.shared.append(line) }
+            )
+            if ok {
+                banner = .success("缓存刷新标记已写入，正在重启桌面…")
+                triggerAutoRespring()
+            } else {
+                banner = .error("缓存刷新失败，请查看日志。")
             }
-        } else {
-            refreshPairingState()
-            guard hasPairing else {
-                banner = .error("请先导入配对记录，或改用直连通道。")
-                return
-            }
-            channel = TunnelChannel(pairingPath: pairingPath)
-        }
-
-        if container.isEmpty {
-            banner = .error("请先在“诊断”里探测一次容器路径。")
-            return
-        }
-
-        let ok = await installer.refreshCache(
-            containerPath: container,
-            channel: channel,
-            log: { line in LogBus.shared.append(line) }
-        )
-        if ok {
-            banner = .success("缓存刷新标记已写入，正在重启桌面…")
-            triggerAutoRespring()
-        } else {
-            banner = .error("缓存刷新失败，请查看日志。")
+        } catch {
+            banner = .error(error.localizedDescription)
         }
     }
 
     // MARK: - 直连通道
 
     /// 解析要用的 App Group：优先用户填的，其次签名里的第一个可用项。
-    /// 这条通道必须有 App Groups 权限，否则 containermanagerd 不会返回结果。
     var resolvedAppGroup: String? {
         SandboxEscape.usableGroup(preferred: appGroupID.trimmingCharacters(in: .whitespacesAndNewlines))
     }
@@ -512,7 +380,10 @@ final class AppModel: ObservableObject {
     /// 申请沙箱扩展并定位 PosterBoard 容器（阻塞操作，放到后台线程）
     private func locateDirectChannel() async throws -> DirectChannel {
         guard let group = resolvedAppGroup else {
-            throw SandboxEscape.Failure(code: -1, message: "签名里没有可用的 App Group，请用带 App Groups 的方式重签")
+            throw SandboxEscape.Failure(
+                code: -1,
+                message: "签名里没有可用的 App Group。worse_query 必须依赖 App Groups 权限，请用带 App Groups 的方式重签（轻松签 / ESign / SideStore 勾选 App Groups）。"
+            )
         }
         let manual = containerPath
         return try await Task.detached(priority: .userInitiated) {
@@ -566,40 +437,5 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 8_000_000_000)
             self.isRespringing = false
         }
-    }
-
-    func respringViaDiagnostics() async {
-        refreshPairingState()
-        guard hasPairing else {
-            banner = .error("请先导入配对记录。")
-            return
-        }
-        let ok = await Task.detached(priority: .userInitiated) { () -> Bool in
-            Airlift.respringDevice(pairingPath: PairingStore.shared.activePath)
-        }.value
-
-        if ok {
-            banner = .success("已通过诊断中继发送重启桌面指令。")
-        } else {
-            banner = .error("诊断中继重启失败，请改用 NeoSpring。")
-        }
-    }
-
-    // MARK: - 配对
-
-    func importPairing(from url: URL) {
-        do {
-            let size = try pairingStore.adopt(url: url)
-            refreshPairingState()
-            banner = .success("已导入配对记录（\(size) 字节）。")
-        } catch {
-            banner = .error(error.localizedDescription)
-        }
-    }
-
-    func deletePairing() {
-        pairingStore.deleteCredentials()
-        refreshPairingState()
-        banner = .info("已删除本机保存的配对凭据。")
     }
 }

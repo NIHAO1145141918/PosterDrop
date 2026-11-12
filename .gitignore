@@ -8,9 +8,6 @@ xcuserdata/
 DerivedData/
 build/
 
-# 构建时拉取的二进制依赖
-Vendor/AirliftFFI.xcframework/
-
 # 本地签名配置
 Config/*.xcconfig.local
 Config/*.mobileprovision

@@ -9,12 +9,10 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.5.0"
-    CURRENT_PROJECT_VERSION: "12"
+    MARKETING_VERSION: "2.0.0"
+    CURRENT_PROJECT_VERSION: "13"
     # 1 = iPhone, 2 = iPad：通用 App，iPad 上支持分屏 / Stage Manager 窗口缩放。
     TARGETED_DEVICE_FAMILY: "1,2"
-    # AirliftFFI 只有 arm64 切片（aws-lc-rs / idevice），模拟器去掉 x86_64。
-    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
     ENABLE_USER_SCRIPT_SANDBOXING: NO
@@ -27,11 +25,6 @@ targets:
       - path: PosterDrop
         excludes:
           - "Resources/Info.plist"
-    dependencies:
-      # 静态库形式的 xcframework，仅链接、不嵌入。
-      - framework: Vendor/AirliftFFI.xcframework
-        embed: false
-        link: true
     settings:
       base:
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -40,8 +33,6 @@ targets:
         INFOPLIST_FILE: PosterDrop/Resources/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        # idevice 的静态库带 C++ 符号（aws-lc），需要链接 libc++。
-        OTHER_LDFLAGS: "-lc++"
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_EMIT_LOC_STRINGS: NO
 

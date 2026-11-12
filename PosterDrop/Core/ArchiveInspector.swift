@@ -68,7 +68,7 @@ enum ArchiveInspector {
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: archive.path, isDirectory: &isDirectory)
         guard exists else {
-            throw AirliftError.failed("文件已被移动或删除：\(archive.lastPathComponent)")
+            throw PosterDropError.failed("文件已被移动或删除：\(archive.lastPathComponent)")
         }
         if isDirectory.boolValue {
             return inspectDirectory(archive)
@@ -134,7 +134,7 @@ enum ArchiveInspector {
 
     private static func inspectZip(_ archive: URL) throws -> ParsedWallpaper {
         guard ZipArchive.looksLikeZip(archive) else {
-            throw AirliftError.failed("「\(archive.lastPathComponent)」不是 zip / .tendies 包（文件头不是 PK）。\n如果它是文件夹形式的壁纸包，请用「导入文件夹」或在“文件”里长按文件夹导入。")
+            throw PosterDropError.failed("「\(archive.lastPathComponent)」不是 zip / .tendies 包（文件头不是 PK）。\n如果它是文件夹形式的壁纸包，请用「导入文件夹」或在“文件”里长按文件夹导入。")
         }
 
         let zip = try ZipArchive(url: archive)
@@ -215,7 +215,7 @@ enum ArchiveInspector {
     static func extract(archive: URL, into directory: URL) throws {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: archive.path, isDirectory: &isDirectory) else {
-            throw AirliftError.failed("文件不存在：\(archive.lastPathComponent)")
+            throw PosterDropError.failed("文件不存在：\(archive.lastPathComponent)")
         }
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -240,12 +240,8 @@ enum ArchiveInspector {
             LogBus.shared.append("   · 原生解压完成（\(count) 个文件）")
             return
         } catch {
-            LogBus.shared.append("   · 原生解压失败：\(error.localizedDescription)，改用 Airlift 解压")
-        }
-
-        let rc = Airlift.extractZip(archive: archive.path, into: directory.path)
-        guard rc == 0 else {
-            throw AirliftError.failed("无法解压 \(archive.lastPathComponent)（错误码 \(rc)）：文件可能不是 zip/tendies 格式，或已被截断。")
+            LogBus.shared.append("   · 解压失败：\(error.localizedDescription)")
+            throw PosterDropError.failed("无法解压 \(archive.lastPathComponent)：\(error.localizedDescription)\n文件可能不是 zip / .tendies 格式，或下载不完整。")
         }
     }
 

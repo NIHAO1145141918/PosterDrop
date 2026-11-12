@@ -121,29 +121,18 @@ struct DiagnosticsView: View {
     private var directCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("直连通道（实验）")
+                Text("沙箱通道 · worse_query")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(model.directEnabled ? "已启用" : "默认关闭")
+                Text("唯一底层")
                     .font(.caption2.weight(.semibold))
-                    .foregroundColor(model.directEnabled ? Theme.accent : .secondary)
+                    .foregroundColor(Theme.accent)
             }
 
-            Text("不经过配对隧道，在 App 内直接向 PosterBoard 容器申请沙箱扩展后写入。依赖 containermanagerd 的符号链接签发缺陷，iOS 26.0–26.7.2 与 27.x 有效（27.2 beta 3 之后隧道已废，这条仍可用）。")
+            Text("worse_query：把 App Group 容器的 Library/Caches 换成指向目标目录的符号链接，再让 containermanagerd 为它签发沙箱扩展。拿到扩展后直接用文件 API 读写 PosterBoard 容器，不经过配对、RSD 或任何 VPN。支持 iOS 26.0–26.7.2 / 27.2。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            Toggle(isOn: $model.directEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("应用壁纸时使用直连通道")
-                        .font(.footnote.weight(.medium))
-                    Text("不再需要配对记录与 LocalDevVPN；失败时可随时关掉回退到隧道")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .tint(Theme.accent)
 
             TextField("App Group（留空则读签名）", text: $model.appGroupID)
                 .font(.system(size: 12, design: .monospaced))
@@ -155,7 +144,7 @@ struct DiagnosticsView: View {
                         .fill(Color.primary.opacity(0.05))
                 )
 
-            Text("这条通道必须有 App Groups 权限：containermanagerd 只对 App Group 容器返回结果。留空会自动读取签名里的 com.apple.security.application-groups；重签时在「轻松签 / ESign → App Groups」里勾一个 group 即可，免费 Personal Team 通常也能签发。")
+            Text("必须有 App Groups 权限：containermanagerd 只对 App Group 容器返回结果。留空会自动读取签名里的 com.apple.security.application-groups；重签时在「轻松签 / ESign → App Groups」里勾一个 group 即可，免费 Personal Team 通常也能签发。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -262,10 +251,6 @@ struct DiagnosticsView: View {
                 model.respringManually()
             }
 
-            actionButton(title: "重启桌面（诊断中继）", subtitle: "通过配对通道发送，NeoSpring 失效时用", symbol: "antenna.radiowaves.left.and.right", tint: .blue) {
-                Task { await model.respringViaDiagnostics() }
-            }
-
             actionButton(title: "打开系统墙纸设置", subtitle: "注入完成后直接挑选壁纸", symbol: "photo.on.rectangle.angled", tint: .green) {
                 Respring.openWallpaperSettings()
             }
@@ -346,11 +331,11 @@ struct DiagnosticsView: View {
                 .font(.subheadline.weight(.semibold))
 
             InfoRow(title: "版本", value: appVersion)
-            InfoRow(title: "适配", value: DeviceLabel.isPad ? "iPadOS 18.0 – 27.2（分通道）" : "iOS 18.0 – 27.2（分通道）")
+            InfoRow(title: "适配", value: DeviceLabel.isPad ? "iPadOS 26.0 – 27.2" : "iOS 26.0 – 27.2")
             InfoRow(title: "设备", value: DeviceLabel.isPad ? "iPad · 支持分屏与台前调度" : "iPhone")
-            InfoRow(title: "底层", value: "Airlift (AirTraffic)", monospaced: true)
+            InfoRow(title: "底层", value: "worse_query（App Group 沙箱扩展）", monospaced: true)
 
-            Text("本工具只做壁纸包的导入与注入，不修改系统 App 的身份或账户信息。写入系统目录属于非官方能力，Apple 可能随时在系统更新中修复：配对隧道自 27.2 beta 3 起已失效，直连通道（container 签发缺陷）仍可用。")
+            Text("本工具只做壁纸包的导入与注入，不修改系统 App 的身份或账户信息。写入系统目录属于非官方能力，Apple 可能随时在系统更新中修复 worse_query 的符号链接签发缺陷。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

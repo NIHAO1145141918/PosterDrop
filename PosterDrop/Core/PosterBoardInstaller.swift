@@ -5,10 +5,10 @@
 //  真正“写入并使用”的一层：
 //    1. 解开壁纸包，取出每个 descriptor 目录
 //    2. 随机化 descriptor / wallpaper 标识，避免与系统已有壁纸冲突
-//    3. 通过 Airlift 通道把目录注入 PRBPosterExtensionDataStore/<ver>/Extensions/<bundleID>/descriptors/<UUID>
-//    4. iOS 18+ 额外双写 .Posters.<Name>App 容器
+//    3. 通过 worse_query 沙箱扩展把目录注入 PRBPosterExtensionDataStore/<ver>/Extensions/<bundleID>/descriptors/<UUID>
+//    4. iOS 18+ 额外双写 .Posters.<Name>App 容器（同一台设备上另一个容器）
 //    5. 写入 com.apple.PosterBoard.unprotectedUserDefaults.plist，让系统重新索引壁纸
-//    6. 由调用方触发 respring，壁纸立即出现在锁屏/墙纸设置里
+//    6. 由调用方触发 NeoSpring respring，壁纸立即出现在锁屏/墙纸设置里
 //
 
 import Foundation
@@ -44,9 +44,13 @@ final class PosterBoardInstaller {
 
     // MARK: - 容器
 
-    func detectContainer(pairingPath: String) async throws -> String {
+    /// 走 worse_query 定位容器（不需要配对、不需要 VPN）。
+    func detectContainer(group: String, manual: String?, log: @escaping (String) -> Void) async throws -> String {
         return try await runOffMain {
-            try Airlift.findContainer(pairingPath: pairingPath, bundleID: self.posterBoardBundleID)
+            guard let hit = ContainerLocator.findPosterBoard(group: group, manual: manual, log: log) else {
+                throw PosterDropError.failed("没有找到 PosterBoard 容器")
+            }
+            return hit.path
         }
     }
 
@@ -62,18 +66,35 @@ final class PosterBoardInstaller {
     ) async throws -> InstallReport {
 
         guard !items.isEmpty else {
-            throw AirliftError.failed("没有选中任何壁纸。")
+            throw PosterDropError.failed("没有选中任何壁纸。")
         }
 
         var container = containerPath.trimmingCharacters(in: .whitespacesAndNewlines)
         while container.hasSuffix("/") { container.removeLast() }
         guard !container.isEmpty else {
-            throw AirliftError.failed("PosterBoard 容器路径为空，请先在“诊断”里自动探测一次。")
+            throw PosterDropError.failed("PosterBoard 容器路径为空，请先在“诊断”里自动探测一次。")
         }
 
         emit(log, "🎯 目标容器：\(container)")
         emit(log, "🔌 写入通道：\(channel.label)")
         emit(log, "🧩 数据结构版本：\(options.structVersion)")
+
+        // iOS 18+ 的 .Posters.<Name>App 是独立容器，先把它们定位好（只做一次）
+        var dualChannels: [String: FileChannel] = [:]
+        if options.dualInject, let direct = channel as? DirectChannel {
+            let pairs = [
+                ("com.apple.WallpaperKit.CollectionsPoster", "com.apple.Posters.CollectionsPosterApp"),
+                ("com.apple.MercuryPoster", "com.apple.Posters.MercuryPosterApp")
+            ]
+            for (legacy, modern) in pairs {
+                if let hit = ContainerLocator.find(bundleID: modern, group: direct.group, manual: nil, log: { line in
+                    emit(log, "  · " + line)
+                }) {
+                    dualChannels[legacy] = DirectChannel(containerPath: hit.path, group: direct.group)
+                }
+            }
+            emit(log, "  · 新容器定位：\(dualChannels.keys.sorted().joined(separator: ", "))")
+        }
 
         var injected = 0
         var failures: [String] = []
@@ -95,7 +116,7 @@ final class PosterBoardInstaller {
                 emit(log, "  · 找到 \(folders.count) 个 descriptor 目录")
 
                 guard !folders.isEmpty else {
-                    throw AirliftError.failed("包里没有可用的 descriptor 目录")
+                    throw PosterDropError.failed("包里没有可用的 descriptor 目录")
                 }
 
                 for (folderIndex, folder) in folders.enumerated() {
@@ -120,11 +141,15 @@ final class PosterBoardInstaller {
                     }
                     injected += 1
 
-                    if options.dualInject, let modernID = Self.modernBundleIdentifier(for: extensionID) {
-                        let modernParent = "\(container)/Library/Application Support/PRBPosterExtensionDataStore/\(options.structVersion)/Extensions/\(modernID)/descriptors"
+                    // iOS 18+ 的 .Posters.<Name>App 是独立容器；能定位到就再写一份，
+                    // 定位不到（旧系统没有这个 App）就跳过，不影响主注入。
+                    if options.dualInject,
+                       let modernID = Self.modernBundleIdentifier(for: extensionID),
+                       let dual = dualChannels[extensionID] {
+                        let modernParent = "\(dual.containerPath)/Library/Application Support/PRBPosterExtensionDataStore/\(options.structVersion)/Extensions/\(modernID)/descriptors"
                         do {
                             try await runOffMain {
-                                try channel.injectFolder(
+                                try dual.injectFolder(
                                     folder: folder.path,
                                     parent: modernParent,
                                     destName: descriptorUUID
@@ -148,7 +173,7 @@ final class PosterBoardInstaller {
 
         if injected == 0 {
             let detail = failures.isEmpty ? "没有注入任何壁纸。" : failures.joined(separator: "\n")
-            throw AirliftError.failed(detail)
+            throw PosterDropError.failed(detail)
         }
 
         emit(log, "")
@@ -231,24 +256,18 @@ final class PosterBoardInstaller {
             return false
         }
 
-        var targets = ["\(containerPath)/Library/Preferences"]
-        if channel.supportsGlobalPreferences {
-            targets.append("/var/mobile/Library/Preferences")
-        }
+        let target = "\(containerPath)/Library/Preferences"
 
-        var success = false
-        for target in targets {
-            do {
-                try await runOffMain {
-                    try channel.writeTree(source: staging.path, target: target)
-                }
-                emit(log, "  ✓ 已写入 \(target)")
-                if target.hasPrefix(containerPath) { success = true }
-            } catch {
-                emit(log, "  ⚠️ 写入 \(target) 失败：\(error.localizedDescription)")
+        do {
+            try await runOffMain {
+                try channel.writeTree(source: staging.path, target: target)
             }
+            emit(log, "  ✓ 已写入 \(target)")
+            return true
+        } catch {
+            emit(log, "  ⚠️ 写入 \(target) 失败：\(error.localizedDescription)")
+            return false
         }
-        return success
     }
 
     // MARK: - 标识随机化

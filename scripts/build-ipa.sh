@@ -13,11 +13,6 @@ cd "$ROOT"
 APP_NAME="PosterDrop"
 BUILD_DIR="build"
 
-if [ ! -d "Vendor/AirliftFFI.xcframework" ]; then
-  echo "!! 缺少 Vendor/AirliftFFI.xcframework，先运行 ./scripts/fetch-vendor.sh" >&2
-  exit 1
-fi
-
 if [ ! -d "$APP_NAME.xcodeproj" ]; then
   echo "==> 生成 Xcode 工程"
   xcodegen generate
@@ -51,6 +46,16 @@ echo "==> 打包 IPA"
 cp -R "$APP_PATH" "$BUILD_DIR/$APP_NAME.app"
 rm -rf "$BUILD_DIR/$APP_NAME.app/_CodeSignature"
 rm -f  "$BUILD_DIR/$APP_NAME.app/embedded.mobileprovision"
+
+# 嵌一份 App Groups entitlement 再做 ad-hoc 签名：
+# SideStore / AltStore 重签时会读取并保留它，worse_query 才有跳板。
+if [ -f "Config/PosterDrop.entitlements" ]; then
+  echo "==> ad-hoc 签名（带 App Groups entitlement）"
+  codesign --force --sign - --timestamp=none \
+    --entitlements "Config/PosterDrop.entitlements" \
+    "$BUILD_DIR/$APP_NAME.app"
+  codesign --display --entitlements :- "$BUILD_DIR/$APP_NAME.app" 2>/dev/null | head -n 20 || true
+fi
 
 mkdir -p "$BUILD_DIR/Payload"
 cp -R "$BUILD_DIR/$APP_NAME.app" "$BUILD_DIR/Payload/$APP_NAME.app"

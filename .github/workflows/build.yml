@@ -15,9 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 底层 Airlift Rust 核心的来源（预编译 xcframework）
-  AIRLIFT_REPO: Mak5er/AirCard-iOS
-  AIRLIFT_REF: 40640c4d827aeab8d798285b57d24fcf6be070d0
   APP_NAME: PosterDrop
 
 jobs:
@@ -36,11 +33,6 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Fetch AirliftFFI.xcframework
-        run: |
-          chmod +x scripts/*.sh
-          ./scripts/fetch-vendor.sh
-
       - name: Install XcodeGen
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -52,7 +44,9 @@ jobs:
           xcodegen --version
 
       - name: Generate project
-        run: xcodegen generate
+        run: |
+          chmod +x scripts/*.sh
+          xcodegen generate
 
       - name: Build IPA
         run: ./scripts/build-ipa.sh Release
