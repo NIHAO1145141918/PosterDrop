@@ -82,16 +82,23 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 
 | 顺序 | 方法 | 说明 |
 | --- | --- | --- |
-| ① | 手动路径 | 诊断页里粘贴容器路径（WQFiles 的 App Data 里能看到 `com.apple.PosterBoard`） |
-| ❷ | MobileInstallation 映射 | 读 `LastLaunchServicesMap.plist` / `com.apple.mobile.installation.plist`，取 `DataContainer`；文件名变了会扫目录里同类的 plist |
-| ❸ | LaunchServices | `LSApplicationWorkspace` 取 `dataContainerURL`，含 `applicationProxyForIdentifier:` 兜底 |
-| ❹ | containermanagerd 枚举 | 遍历 class 1–14，带 `container_query_set_include_other_owners(true)` |
-| ❺ | 按 bundle id 查询 | `container_query_set_identifiers(class 2)`，同时试 `xpc_string` / `xpc_array` |
-| ❻ | 容器父目录列举 | 通常被拒，最后试一次 |
+| ① | 手动路径 | 诊断页输入框，粘贴 WQFiles 里复制的路径（可编辑） |
+| ❷ | MobileInstallation 映射 | 读 `LastLaunchServicesMap.plist` / `com.apple.mobile.installation.plist`，取 `DataContainer` |
+| ❸ | **`fsgetpath` 反查** | 遍历 inode 把 `Containers/Data/Application` 里的 UUID 全部还原成路径，再逐个签发扩展、读容器 xattr 认领 `com.apple.PosterBoard` |
+| ❹ | LaunchServices | `LSApplicationWorkspace` 取 `dataContainerURL`，含 `applicationProxyForIdentifier:` 兜底 |
+| ❺ | containermanagerd 枚举 | 遍历 class 1–14，带 `container_query_set_include_other_owners(true)` |
+| ❻ | 按 bundle id 查询 | `container_query_set_identifiers(class 2)`，同时试 `xpc_string` / `xpc_array` |
+| ❼ | 容器父目录列举 | 通常被拒，最后试一次 |
 
 命中后还会验证 `<容器>/Library/Application Support/PRBPosterExtensionDataStore` 是否真实存在，只有这一步通过才算可用。
 
-> **iOS 27 实测（27.0 / 24A5370h）**：`container_query` 枚举 class 1–14 返回 **0 个容器**，容器父目录也不允许 `opendir`——worse_query 的能力是“已知路径 → 签发扩展”，不是“枚举出路径”。所以自动定位主要靠 ❷ 的系统数据库；如果连数据库也读不到，就去 WQFiles 的「App Data › PosterBoard」长按复制容器路径，粘贴到诊断页的输入框（那里现在可以直接编辑）。
+> **❸ 是 1.5.0 的关键。** `fsgetpath(fsid, inode)` 把 inode 还原成路径，这一步不受沙箱限制——不需要“能读目录”，也不需要 VPN。
+> 遍历上界取「自己刚建的临时文件」的 inode（inode 单调递增，比它大的都还不存在），所以不用猜也不用全扫。
+> 容器根目录的 xattr `com.apple.containermanager.identifier` 就是 bundle id，认领容器不必读里面的文件。
+> 代价是第一次要扫几秒；命中后路径会存下来，之后直接复用。
+
+> **iOS 27 实测（27.0 / 24A5370h）**：`container_query` 枚举 class 1–14 返回 **0 个容器**，容器父目录也不允许 `opendir`，`/var/mobile/Library/MobileInstallation` 这些数据库路径要么不存在、要么签不出扩展。
+> 所以「让系统把路径交出来」这条路走不通，得自己把路径算出来——这正是 ❸ 做的事。
 
 ### 1.5 怎么确认自己这台能用
 
