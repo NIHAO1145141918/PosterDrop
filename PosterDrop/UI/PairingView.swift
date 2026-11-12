@@ -330,7 +330,11 @@ struct PairingView: View {
 
     private func refresh() {
         model.refreshPairingState()
-        tunnelReport = TunnelStatus.probe()
+        // 先给一个接口层的即时结果，再用真实拨号结果覆盖
+        tunnelReport = TunnelStatus.probeInterfaces()
+        TunnelStatus.probeConnectivity { report in
+            tunnelReport = report
+        }
         candidates = PairingStore.shared.discoveredPairingFiles()
     }
 

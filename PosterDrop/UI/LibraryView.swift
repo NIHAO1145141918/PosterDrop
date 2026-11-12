@@ -17,13 +17,6 @@ struct LibraryView: View {
     @State private var detailItem: WallpaperItem?
     @State private var isDropTargeted = false
 
-    /// 不再用扩展名白名单过滤选择器：`.tendies` 这类自定义类型在“文件”里
-    /// 经常被识别成 public.data 甚至没有类型，白名单会把文件灰掉选不了。
-    /// 这里放开到任意文件 / 文件夹，选完再自己校验，失败给出具体原因。
-    private var importTypes: [UTType] {
-        return [.item, .folder]
-    }
-
     var body: some View {
         NavigationStack {
             ZStack {
@@ -80,19 +73,20 @@ struct LibraryView: View {
             .safeAreaInset(edge: .bottom) {
                 applyBar
             }
-            .fileImporter(
-                isPresented: $showImporter,
-                allowedContentTypes: importTypes,
-                allowsMultipleSelection: true
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    guard !urls.isEmpty else { return }
-                    Task { await model.importURLs(urls) }
-                case .failure(let error):
-                    if (error as NSError).code == NSUserCancelledError { return }
-                    model.banner = .error("选择文件失败：\(error.localizedDescription)")
-                }
+            .sheet(isPresented: $showImporter) {
+                DocumentPicker(
+                    onPick: { urls in
+                        showImporter = false
+                        guard !urls.isEmpty else { return }
+                        LogBus.shared.append("📂 选择器返回 \(urls.count) 个文件：\(urls.map { $0.lastPathComponent }.joined(separator: ", "))")
+                        Task { await model.importURLs(urls) }
+                    },
+                    onCancel: {
+                        showImporter = false
+                        LogBus.shared.append("📂 已取消选择文件")
+                    }
+                )
+                .ignoresSafeArea()
             }
             .sheet(item: $detailItem) { item in
                 WallpaperDetailView(item: item)
@@ -219,9 +213,7 @@ struct LibraryView: View {
             Text("还没有壁纸")
                 .font(.headline)
 
-            Text(DeviceLabel.isPad
-                 ? "点「导入壁纸」从“文件”里选 .tendies 包或整个文件夹，\n也可以直接从“文件”App 拖进本页。"
-                 : "点「导入壁纸」从“文件”里选 .tendies 包或整个文件夹，\n或把文件放进「文件 › 我的 iPhone › PosterDrop」后点「扫描文档」。")
+            Text("点「导入壁纸」选 .tendies / .zip 或整个文件夹。\n也可以把文件拷进「文件 › 我的 \(DeviceLabel.deviceName) › PosterDrop」，再点「扫描文档」。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
