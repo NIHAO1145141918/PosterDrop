@@ -400,9 +400,7 @@ enum ContainerLocator {
             paths.insert(canonical, at: 0)
             UserDefaults.standard.set(Array(paths.prefix(400)), forKey: ScanCache.paths)
         }
-        if UserDefaults.standard.object(forKey: ScanCache.date) == nil {
-            UserDefaults.standard.set(Date(), forKey: ScanCache.date)
-        }
+        UserDefaults.standard.set(Date(), forKey: ScanCache.date)
     }
 
     // MARK: - containermanagerd

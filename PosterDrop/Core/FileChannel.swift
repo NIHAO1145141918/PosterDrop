@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import Darwin
 
 protocol FileChannel: AnyObject {
     /// 展示用名称
@@ -191,27 +192,54 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
         }
     }
 
+    /// 用 read/write 分块拷贝，不用 FileManager.copyItem：
+    /// copyfile(3) 会顺带复制 xattr / ACL，在别人的容器里常因元数据写入被拒而整次失败；
+    /// 流式写入只要求目标目录的写权限，和 WQFiles 的做法一致。
     private func copyFile(from source: String, to destination: String) throws {
-        let fileManager = FileManager.default
         let parent = (destination as NSString).deletingLastPathComponent
         try ensureGranted(parent, writable: true)
-        do {
-            try? fileManager.removeItem(atPath: destination)
-            try fileManager.copyItem(atPath: source, toPath: destination)
-        } catch {
-            // 扩展可能在这一轮被淘汰或刚好失效：重新签发一次再写
-            if let retry = try? SandboxEscape.grant(path: parent, group: group, requireWrite: true) {
-                _ = retry
-                do {
-                    try? fileManager.removeItem(atPath: destination)
-                    try fileManager.copyItem(atPath: source, toPath: destination)
-                    return
-                } catch {
-                    // 落到下面统一报错
-                }
-            }
-            throw SandboxEscape.Failure(code: -13, message: "写入 \(destination) 失败：\(error.localizedDescription)")
+
+        let input = open(source, O_RDONLY | O_CLOEXEC)
+        guard input >= 0 else {
+            throw SandboxEscape.Failure(code: -13, message: "读取 \(source) 失败（errno \(errno)）")
         }
+        defer { close(input) }
+
+        unlink(destination)
+        var output = open(destination, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        if output < 0 && (errno == EPERM || errno == EACCES) {
+            // 扩展可能在这一轮被淘汰：重新签发再试一次
+            _ = try? SandboxEscape.grant(path: parent, group: group, requireWrite: true)
+            output = open(destination, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        }
+        guard output >= 0 else {
+            throw SandboxEscape.Failure(code: -13, message: "写入 \(destination) 失败（errno \(errno)）")
+        }
+        defer { close(output) }
+
+        let chunk = 1 << 20
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: chunk, alignment: 16)
+        defer { buffer.deallocate() }
+
+        while true {
+            let readCount = read(input, buffer, chunk)
+            if readCount < 0 && errno == EINTR { continue }
+            guard readCount >= 0 else {
+                throw SandboxEscape.Failure(code: -13, message: "读取 \(source) 失败（errno \(errno)）")
+            }
+            if readCount == 0 { break }
+
+            var written = 0
+            while written < readCount {
+                let count = write(output, buffer.advanced(by: written), readCount - written)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else {
+                    throw SandboxEscape.Failure(code: -13, message: "写入 \(destination) 失败（errno \(errno)）")
+                }
+                written += count
+            }
+        }
+        fsync(output)
     }
 
     private func countFiles(in root: String) -> Int {
