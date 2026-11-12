@@ -20,10 +20,9 @@ env:
 jobs:
   build:
     name: Build unsigned IPA
-    # hosted 的 arm64 macOS 池容量紧张，经常排队 15 分钟也抢不到（报
-    # "not acquired by Runner of type hosted"）。这不是配置错误：
-    # 直接重跑同一次 workflow 就行。macos-14 / macos-15-intel 这些标签
-    # 在这个账号上不可用（会报 configuration not supported），不要换。
+    # 用明确的 macos-15 标签：macos-latest 在这个账号上曾经连续几小时排队抢不到
+    # 机器（"not acquired by Runner of type hosted"），换标签后几十秒就拿到。
+    # macos-14 / macos-15-intel 在这个账号不可用（configuration not supported）。
     runs-on: macos-15
     timeout-minutes: 45
 
