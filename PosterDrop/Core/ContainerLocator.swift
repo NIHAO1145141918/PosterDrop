@@ -142,14 +142,11 @@ enum ContainerLocator {
 
     // MARK: - 批量识别
 
-    /// 在一批路径里找 PosterBoard：xattr 直接读 → 读不到再签发 → 再读不到就看数据目录。
+    /// 在一批路径里找目标 App：先读 xattr，读不到就签发一次再读，最后看数据目录。
+    /// 每个容器单独完整交换一次 Caches —— 和 WQFiles 的 grant 顺序一致，
+    /// 不依赖“重指符号链接”这种未经验证的优化。
     private static func identify(paths: [String], group: String, target: String, log: (String) -> Void, source: String) -> Hit? {
         guard !paths.isEmpty else { return nil }
-        guard let sweeper = SandboxEscape.Sweeper(group: group) else {
-            log("   ⚠️ 无法建立批量签发会话（App Group 不可用）")
-            return nil
-        }
-        defer { sweeper.finish() }
 
         var identified = 0
         var checked = 0
@@ -158,30 +155,23 @@ enum ContainerLocator {
             if checked % 40 == 0 {
                 log("   已检查 \(checked)/\(paths.count)…")
             }
-            if let identifier = sweeper.identifier(of: path) {
+
+            if SandboxEscape.containerIdentifier(at: path) == nil {
+                _ = try? SandboxEscape.grant(path: path, group: group)
+            }
+            let identifier = SandboxEscape.containerIdentifier(at: path)
+
+            if let identifier {
                 identified += 1
-                if identifier.lowercased() == target.lowercased() {
-                    log("   ✅ 认领到 \(target)：\(path)")
-                    if target != posterBoardBundleID || sweeper.contains(path, relative: storeRelativePath) || SandboxEscape.exists(path + "/" + storeRelativePath) {
-                        sweeper.finish()
-                        _ = try? SandboxEscape.grant(path: path, group: group)
-                        cacheHit(path)
-                        return Hit(path: SandboxEscape.canonicalPath(path), source: source)
-                    }
-                    log("   ⚠️ 容器对，但里面还没有数据目录，稍后会创建")
-                    sweeper.finish()
-                    _ = try? SandboxEscape.grant(path: path, group: group)
-                    cacheHit(path)
-                    return Hit(path: SandboxEscape.canonicalPath(path), source: source)
-                }
-                continue
+                guard identifier.lowercased() == target.lowercased() else { continue }
+                log("   ✅ 认领到 \(target)：\(path)")
+                cacheHit(path)
+                return Hit(path: SandboxEscape.canonicalPath(path), source: source)
             }
 
-            // xattr 读不到：有些容器要签发之后才能读 metadata，退一步看数据目录
-            if target == posterBoardBundleID, sweeper.contains(path, relative: storeRelativePath) {
+            // xattr 读不到：退一步看数据目录是不是存在
+            if target == posterBoardBundleID, SandboxEscape.exists(path + "/" + storeRelativePath) {
                 log("   ✅ 按数据目录命中：\(path)")
-                sweeper.finish()
-                _ = try? SandboxEscape.grant(path: path, group: group)
                 cacheHit(path)
                 return Hit(path: SandboxEscape.canonicalPath(path), source: source + " · 目录判定")
             }
