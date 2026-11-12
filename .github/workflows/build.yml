@@ -20,9 +20,10 @@ env:
 jobs:
   build:
     name: Build unsigned IPA
-    # arm64 主机池经常排队十几分钟还抢不到（hosted runner 容量限制）。
-    # macos-15-intel 是 x86_64 池，Xcode 16 一样能编 iOS 18，排队快得多。
-    runs-on: macos-15-intel
+    # 这里只用 hosted 的 macos-latest（arm64）。容量紧张时会排队，
+    # 排队超时（约 15 分钟）直接重跑同一次 workflow 即可，不要改标签——
+    # 未知标签同样会以 “not acquired” 失败，看起来和容量不足一模一样。
+    runs-on: macos-latest
     timeout-minutes: 45
 
     steps:
