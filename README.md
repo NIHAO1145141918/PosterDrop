@@ -7,7 +7,8 @@ PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → �
 - 全部操作在 iPhone / iPad 本地完成：配对隧道（Airlift/AirTraffic）或直连通道（container 沙箱扩展），二选一
 - 通用 App（`TARGETED_DEVICE_FAMILY = 1,2`）：同一份 IPA 装 iPhone 和 iPad，iPad 支持四方向、分屏、台前调度与拖放导入
 - 支持 iOS / iPadOS 18.0 – 27.2 beta 2（隧道）/ 26.0 – 27.2（直连，需签名带 App Groups），详见[兼容性](#一兼容性)
-- 支持 `.tendies` / `.zip` / 整容器归档，自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
+- 支持 `.tendies` / `.zip` / 整容器归档 / **已解压的文件夹**，自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
+- 自带 zip 解析（不依赖 Airlift 解压），只需读中央目录 + 单张预览图，大包不会因临时目录空间不足失败
 - 自动抽取预览图、判定描述符数量、双写 iOS 18+ 的新容器
 - 内置配对管理、容器探测、缓存刷新、NeoSpring respring、运行日志
 
@@ -145,7 +146,7 @@ PosterBoard 把每张壁纸存成一组描述符目录：
 
 PosterDrop 做四件事：
 
-1. 解开 `.tendies`（zip），递归找出所有 descriptor 目录（判据：含 `versions/`、`providerInfo.plist`、`Wallpaper.plist` 之一）；
+1. 用内置 `ZipArchive` 读中央目录（不整包解压）递归找出所有 descriptor 目录（判据：含 `versions/`、`providerInfo.plist`、`Wallpaper.plist` 之一）；
 2. **随机化标识**（只改纯数字标识，保留 `v6x.colorA` 这类符号标识，否则 Mercury/Unity 会失效）；
 3. 调用 `al_exploit_inject_folder` 把目录原子注入，iOS 18+ 再往 `com.apple.Posters.<Name>App` 双写一份；
 4. 写入 `com.apple.PosterBoard.unprotectedUserDefaults.plist`（`PBF_RESET_FILE_PROTECTIONS` 等键），强制系统重新索引，最后用 **NeoSpring** 打崩 SpringBoard 让壁纸立刻出现。
@@ -286,7 +287,7 @@ xcodegen generate
 2. **配对**：
    - iOS 27+：配对页 → 开始本机配对 → 记下 6 位 PIN → 设置 › 隐私与安全性 › 开发者模式 › 与 PosterDrop 配对 → 输入 PIN；
    - iOS 18–26：配对页 → 导入配对文件（SideStore 的 `ALTPairingFile.mobiledevicepairing` 等）。
-3. **导入壁纸**：壁纸页 → 导入壁纸（或把 `.tendies` 放进「文件 › 我的 iPhone / iPad › PosterDrop」，再点「扫描文档」；iPad 也可直接从“文件”拖进壁纸页）。
+3. **导入壁纸**：壁纸页 → 导入壁纸，可以选 `.tendies` / `.zip`，也可以选**整个已解压的文件夹**（或把文件放进「文件 › 我的 iPhone / iPad › PosterDrop」的任意子目录，再点「扫描文档」，它是递归扫描的；iPad 也可直接从“文件”拖进壁纸页）。
 4. **应用**：勾选 → 应用所选（或单张长按/详情页应用）。注入完成后自动 respring。
 5. **选用**：锁屏长按 → 自定义 → 墙纸，或「设置 › 墙纸」里选择新出现的壁纸。
 
