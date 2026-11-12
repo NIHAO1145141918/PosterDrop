@@ -20,10 +20,11 @@ env:
 jobs:
   build:
     name: Build unsigned IPA
-    # 这里只用 hosted 的 macos-latest（arm64）。容量紧张时会排队，
-    # 排队超时（约 15 分钟）直接重跑同一次 workflow 即可，不要改标签——
-    # 未知标签同样会以 “not acquired” 失败，看起来和容量不足一模一样。
-    runs-on: macos-14
+    # hosted 的 arm64 macOS 池容量紧张，经常排队 15 分钟也抢不到（报
+    # "not acquired by Runner of type hosted"）。这不是配置错误：
+    # 直接重跑同一次 workflow 就行。macos-14 / macos-15-intel 这些标签
+    # 在这个账号上不可用（会报 configuration not supported），不要换。
+    runs-on: macos-latest
     timeout-minutes: 45
 
     steps:
