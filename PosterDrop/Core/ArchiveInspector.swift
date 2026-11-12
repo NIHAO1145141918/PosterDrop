@@ -73,7 +73,20 @@ enum ArchiveInspector {
         if isDirectory.boolValue {
             return inspectDirectory(archive)
         }
-        return try inspectZip(archive)
+
+        do {
+            return try inspectZip(archive)
+        } catch let zipError as ZipError {
+            // 中央目录解析失败（少见格式 / 文件截断）：退回「整包解压后按目录判定」
+            LogBus.shared.append("   · 原生解析失败：\(zipError.localizedDescription)，回退整包解压")
+            let temp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("posterdrop-fallback-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: temp) }
+            try extract(archive: archive, into: temp)
+            var parsed = inspectDirectory(temp)
+            parsed.isDirectory = false
+            return parsed
+        }
     }
 
     // MARK: - 文件夹
@@ -428,7 +441,10 @@ enum ArchiveInspector {
 
         guard let entry = best?.entry else { return nil }
         // 预览图一般不大会超过 32 MB，超出就放弃，别为了一张图卡住导入
-        guard let data = try? zip.data(for: entry, limit: 32 * 1024 * 1024) else { return nil }
+        guard let data = try? zip.data(for: entry, limit: 32 * 1024 * 1024) else {
+            LogBus.shared.append("   · 预览图跳过（\(entry.lastComponent) 解压失败）")
+            return nil
+        }
         return thumbnailJPEG(data: data, maxPixel: maxPixel, quality: quality)
     }
 

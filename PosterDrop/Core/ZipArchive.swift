@@ -227,9 +227,18 @@ final class ZipArchive {
         }
     }
 
+    /// Compression 框架的 COMPRESSION_ZLIB 走的是 raw DEFLATE（zip 用的就是这种）。
+    /// 为防系统实现差异，原始数据解不开时再试一次「跳过 2 字节 zlib 头」。
     private func inflate(_ data: Data, expected: Int) throws -> Data {
         if expected == 0 { return Data() }
+        if let output = decodeDeflate(data, expected: expected) { return output }
+        if data.count > 6, let output = decodeDeflate(data.dropFirst(2), expected: expected) {
+            return output
+        }
+        throw ZipError.corrupt("deflate 解压失败")
+    }
 
+    private func decodeDeflate(_ data: Data, expected: Int) -> Data? {
         var capacity = max(expected, 64)
         for _ in 0..<3 {
             var output = Data(count: capacity)
@@ -251,7 +260,7 @@ final class ZipArchive {
             capacity *= 4
             if capacity > ZipArchive.singleEntryLimit { break }
         }
-        throw ZipError.corrupt("deflate 解压失败")
+        return nil
     }
 
     // MARK: - 整体解压
