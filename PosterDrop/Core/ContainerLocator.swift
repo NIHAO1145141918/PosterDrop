@@ -57,7 +57,7 @@ enum ContainerLocator {
         log("② LaunchServices 映射…")
         let services = launchServicesContainers()
         log("   返回 \(services.count) 条带 DataContainer 的记录")
-        for item in services where matches(item.identifier) {
+        for item in services where matches(item.identifier, target: bundleID) {
             log("   命中 \(item.identifier)：\(item.path)")
             if verify(path: item.path, group: group, target: bundleID, log: log) {
                 cacheHit(item.path)

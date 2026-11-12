@@ -80,7 +80,7 @@ final class PosterBoardInstaller {
         emit(log, "🧩 数据结构版本：\(options.structVersion)")
 
         // iOS 18+ 的 .Posters.<Name>App 是独立容器，先把它们定位好（只做一次）
-        var dualChannels: [String: FileChannel] = [:]
+        var dualChannels: [String: DirectChannel] = [:]
         if options.dualInject, let direct = channel as? DirectChannel {
             let pairs = [
                 ("com.apple.WallpaperKit.CollectionsPoster", "com.apple.Posters.CollectionsPosterApp"),
