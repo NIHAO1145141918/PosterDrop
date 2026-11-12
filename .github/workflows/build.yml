@@ -20,7 +20,9 @@ env:
 jobs:
   build:
     name: Build unsigned IPA
-    runs-on: macos-latest
+    # arm64 主机池经常排队十几分钟还抢不到（hosted runner 容量限制）。
+    # macos-15-intel 是 x86_64 池，Xcode 16 一样能编 iOS 18，排队快得多。
+    runs-on: macos-15-intel
     timeout-minutes: 45
 
     steps:
