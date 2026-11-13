@@ -35,7 +35,7 @@ enum PosterKind: String, Codable, CaseIterable {
         }
     }
 
-    /// iOS 18+ 还有一套「.Posters.<Name>App」新容器，需要双写才能稳定出现。
+    /// iOS 26 起还有一套「.Posters.<Name>App」新容器，需要双写才能稳定出现。
     var modernBundleID: String? {
         switch self {
         case .collections:

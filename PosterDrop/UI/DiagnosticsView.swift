@@ -266,7 +266,7 @@ struct DiagnosticsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("自动选择数据结构版本")
                         .font(.footnote.weight(.medium))
-                    Text("iOS 17 及以上使用 61，更早的系统使用 59")
+                    Text("新结构用 61，旧结构用 59")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -275,8 +275,8 @@ struct DiagnosticsView: View {
 
             if !model.autoStructVersion {
                 Picker("结构版本", selection: $model.manualStructVersion) {
-                    Text("59（iOS 16 及更早）").tag(59)
-                    Text("61（iOS 17 及以上）").tag(61)
+                    Text("59（旧结构）").tag(59)
+                    Text("61（新结构，默认）").tag(61)
                 }
                 .pickerStyle(.segmented)
             }
@@ -296,7 +296,7 @@ struct DiagnosticsView: View {
 
             Toggle(isOn: $model.dualInject) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("同时写入新容器（iOS 18+）")
+                    Text("同时写入新容器（iOS 26+）")
                         .font(.footnote.weight(.medium))
                     Text("额外写一份 .Posters.<Name>App，壁纸更容易出现在“墙纸”里")
                         .font(.caption2)

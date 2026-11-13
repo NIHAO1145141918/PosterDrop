@@ -6,7 +6,7 @@
 //    1. 解开壁纸包，取出每个 descriptor 目录
 //    2. 随机化 descriptor / wallpaper 标识，避免与系统已有壁纸冲突
 //    3. 通过 worse_query 沙箱扩展把目录注入 PRBPosterExtensionDataStore/<ver>/Extensions/<bundleID>/descriptors/<UUID>
-//    4. iOS 18+ 额外双写 .Posters.<Name>App 容器（同一台设备上另一个容器）
+//    4. iOS 26+ 额外双写 .Posters.<Name>App 容器（同一台设备上另一个容器）
 //    5. 写入 com.apple.PosterBoard.unprotectedUserDefaults.plist，让系统重新索引壁纸
 //    6. 由调用方触发 NeoSpring respring，壁纸立即出现在锁屏/墙纸设置里
 //
@@ -78,7 +78,7 @@ final class PosterBoardInstaller {
         emit(log, "🎯 目标容器：\(container)")
         emit(log, "🔌 写入通道：\(channel.label)")
         emit(log, "🧩 数据结构版本：\(options.structVersion)")
-        // iOS 18+ 的 .Posters.<Name>App 是独立容器，按需定位（只有真的遇到这类壁纸才查）
+        // iOS 26+ 的 .Posters.<Name>App 是独立容器，按需定位（只有真的遇到这类壁纸才查）
         var dualChannels: [String: DirectChannel] = [:]
         var dualMisses: Set<String> = []
         let dualGroup = (channel as? DirectChannel)?.group
@@ -136,7 +136,7 @@ final class PosterBoardInstaller {
                     }
                     injected += 1
 
-                    // iOS 18+ 的 .Posters.<Name>App 是独立容器；能定位到就再写一份，
+                    // iOS 26+ 的 .Posters.<Name>App 是独立容器；能定位到就再写一份，
                     // 定位不到（旧系统没有这个 App）就跳过，不影响主注入。
                     if options.dualInject,
                        let modernID = Self.modernBundleIdentifier(for: extensionID),

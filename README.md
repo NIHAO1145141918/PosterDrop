@@ -1,128 +1,143 @@
 # PosterDrop
 
-把 **PosterBoard 动态壁纸包（`.tendies`）** 导入设备并直接「装进系统」，无需越狱、无需电脑中转。
+把 **PosterBoard 动态壁纸包（`.tendies`）** 导入 iPhone / iPad，直接装进系统，**免越狱、免电脑、免 VPN**。
 
-PosterDrop 只做一件事：**导入动态壁纸 → 注入 → respring → 立刻可用**。
+导入 → 注入 → respring，全程在设备上完成，一分钟内出结果。
 
-- **底层只有一条：worse_query 的 App Group 沙箱逃逸。** 不需要配对文件、不需要 LocalDevVPN、不走 RSD。
-- 通用 App（`TARGETED_DEVICE_FAMILY = 1,2`）：同一份 IPA 装 iPhone 和 iPad，iPad 支持四方向、分屏、台前调度与拖放导入。
-- 支持 iOS / iPadOS 26.0 – 27.2（worse_query 的适用范围），详见[兼容性](#一兼容性)。
-- 支持 `.tendies` / `.zip` / 整容器归档 / **已解压的文件夹**，自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸。
-- 自带 zip 解析，只读中央目录 + 单张预览图，大包不会因临时目录空间不足失败。
-- 自动抽取预览图、判定描述符数量；iOS 18+ 额外写一份独立的 `.Posters.<Name>App` 容器。
-- 容器定位、写入校验、缓存刷新、NeoSpring respring、运行日志都在 App 内完成。
-- **自检 / 定位是秒级的**：符号只解析一次、批量签发只装一次 Caches 符号链接、定位结果落缓存，第二次自检基本一步命中。
+- **支持 iOS / iPadOS 26.0 – 27.2**（只有 26 和 27 两代，详见[系统支持](#二系统支持)）
+- 同一份 IPA 装 iPhone 和 iPad，iPad 支持分屏、台前调度、拖放导入
+- 支持 `.tendies` / `.zip` / 已解压的文件夹 / 整容器归档
+- 自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
+- 自带缓存清理，能清理 PosterBoard 和其他 App 的缓存与临时文件
 
-> 仅供安全研究与个人设备定制使用。请只在你自己拥有或获授权管理的设备上运行。
+> 仅供安全研究与个人设备定制使用，请只在你自己拥有或获授权管理的设备上运行。
 
 ---
 
-## 一、兼容性
+## 一、功能
 
-### 1.1 应用本体
+### 1. 导入与注入
 
-| 项目 | 要求 |
+| 功能 | 说明 |
 | --- | --- |
-| 系统 | iOS / iPadOS **26.0 – 27.2**（部署目标 18.0，但低于 26.0 没有这条签发缺陷） |
-| 机型 | **iPhone + iPad**（`TARGETED_DEVICE_FAMILY = 1,2`），iPad 支持四方向、分屏、台前调度 |
-| 架构 | arm64 |
-| 安装 | 未签名 IPA，需 SideStore / AltStore / Sideloadly / TrollStore 自签 |
-| 签名 | **必须带 `com.apple.security.application-groups`**（见 1.3） |
+| 多格式导入 | `.tendies`、`.zip`、整个已解压的文件夹，或丢进「文件 › PosterDrop」后一键扫描 |
+| 自动识别 | 按 `versions/`、`providerInfo.plist`、`Wallpaper.plist` 判定描述符目录，支持五类壁纸 |
+| 内置 zip 解析 | 只读中央目录和单张预览图，几 GB 的包也不会因为临时空间不足失败 |
+| 预览与筛选 | 自动抽首帧做缩略图，按类型 / 名称分组，支持批量勾选 |
+| 一键注入 | 逐目录签发沙箱扩展写入 PosterBoard 容器，写完比对文件数 |
+| 双写新容器 | iOS 26+ 额外写一份 `.Posters.<Name>App`，壁纸更容易出现在「墙纸」里 |
+| 即时生效 | 写偏好后 NeoSpring respring，回到锁屏就能选 |
 
-**iPad 适配说明**
+注入采用 `clonefile` 零拷贝：同卷整树克隆是元数据操作，几百 MB 的壁纸也不会因为逐文件读写而拖时间；克隆不可用时自动回退流式拷贝，不影响成功率。
 
-- iPhone 与 iPad 共用同一个 bundle、同一份 IPA，签名流程完全一致（iPad 也要在重签工具里勾 App Groups）。
-- 界面：iPad 全宽时页签变成侧边栏；内容限制在 760pt 版心内居中，壁纸列表按窗口宽度自动单列 / 双列。
-- 窗口：`UIRequiresFullScreen` 已移除，可在分屏、Slide Over、台前调度里任意缩放；窄窗口自动退回底部标签栏和单列布局。
-- 导入：除「导入壁纸」外，iPad 上可直接从“文件”App 把 `.tendies` 拖进壁纸页。
-- 注入：与 iPhone 完全同一套代码，能否使用只取决于 **iPadOS 版本**，与机型无关。
+### 2. 缓存清理
 
-### 1.2 系统版本
+第三个页签，按范围分三组：
 
-worse_query 支持 iOS 26.0 – 26.7.2 / 27.2。区间内唯一变化是查询 flags：
-
-| iOS / iPadOS 版本 | 状态 | 说明 |
+| 分组 | 清理项 | 默认 |
 | --- | --- | --- |
-| 17.x 及更早 | ❌ | 低于部署目标，且没有 App Group 签发缺陷 |
-| 18.0 – 25.x | ❌ | 没有这条缺陷，旧版的 Airlift 隧道也已移除 |
+| 本 App | 解包暂存（导入中断留下的临时目录）、本 App 缓存 | ✅ |
+| PosterBoard | 壁纸缩略图缓存、`tmp`、应用快照、窗口状态存档 | 前两项 ✅ |
+| 其他 App | 可见容器的 `Library/Caches` + `tmp` 汇总 | ⬜（需深度扫描） |
+
+顶部显示可清理总量，勾选后底部按钮直接给出「清理 3 项 · 136 MB」。清掉 PosterBoard 缩略图后会提示一键 respring 重建，避免预览变灰块让人以为壁纸丢了。
+
+**安全护栏**（这部分比功能本身重要）：
+
+1. **路径不可伪造** —— 只由「合法容器根 + 固定相对路径」拼出，界面上没有任何入口能传入任意路径；
+2. **符号链接只删链接本身** —— `lstat` 判定是链接就走 `unlink`，绝不跟进。App Group 的 `Library/Caches` 本身就是链接，跟进去会删到别的容器；
+3. **逐层签发** —— 扩展只覆盖签发的那一个目录，所以每层删除前先给父目录签发写权限，子目录清空后才 `rmdir`；
+4. **不碰壁纸本体** —— 壁纸在 `Library/Application Support/PRBPosterExtensionDataStore`，不在任何清理路径里。
+
+### 3. 诊断
+
+| 功能 | 说明 |
+| --- | --- |
+| 自检通道 | 检查签名里的 App Groups、申请沙箱扩展、定位 PosterBoard 容器，全流程带阶段计时 |
+| 容器路径 | 自动定位，也支持手动粘贴 WQFiles 里复制的路径 |
+| VPN 检测 | 端口拨号判断是否真的能通，区分「有 utun 网卡」和「隧道可用」 |
+| 结构版本 | 切换 59 / 61 两套描述符结构，应对不同系统布局 |
+| 运行日志 | 每一步的签发、写入、校验结果都在 App 内可见，可复制 |
+
+---
+
+## 二、系统支持
+
+**支持 iOS / iPadOS 26.0 – 27.2。**
+
+Apple 在 iOS 18 之后直接跳到 **iOS 26**（2025 年启用年份命名），**不存在 iOS 19、20、21、22、23、24、25** 这几个版本号。所以本项目的支持区间只有 26 和 27 两代，任何写「支持 iOS 19–25」的说法都是错的。
+
+| 版本 | 状态 | 说明 |
+| --- | --- | --- |
+| 18.x 及更早 | ❌ | 没有这条签发缺陷，功能不可用 |
+| 19 – 25 | — | **不存在这些版本号** |
 | 26.0 – 26.6.1 | ✅ | App Group 查询使用备用 flags（`0x0000000800000000`） |
 | 26.7 – 26.7.2 | ✅ | 同上 |
 | 27.0 – 27.2 | ✅ | 使用标准 flags（`0x0000008000000000`） |
-| 27.3 及以后 | ⚠️ 未验证 | 先跑「诊断 › 自检通道」，失败就说明漏洞已被修补 |
+| 27.3 及以后 | ⚠️ 未验证 | 先跑「诊断 › 自检通道」，返回 -5 / -6 / -8 说明缺陷已被修补 |
 
 > 「✅」= 有公开实现或实测记录；「⚠️」= 没有设备验证；「❌」= 明确不可用。
 
-### 1.3 前置条件
+### 机型与安装
 
-1. **签名里必须带 `com.apple.security.application-groups`。** 这条是硬要求，不是可选项：
-   containermanagerd 只对 App Group 容器签发扩展，自身容器（class 2）拿不到 token。
-   - 用 **轻松签 / ESign** 重签时勾选 App Groups，填任意一个 profile 允许的 group（如 `group.com.posterdrop.shared`）；
-   - **Sideloadly 默认不会加 App Groups**，会直接报「签名里没有可用的 App Group」；
-   - 免费 Personal Team 在 Xcode 27 上通常也能签出 App Groups，但会随证书 7 天过期；
-   - 应用会自动读签名里的 group，不需要手填；填了则以手填的为准。
-2. 设备已解锁（首次访问容器会校验数据保护状态）。
-3. 不需要 VPN、不需要配对记录、不需要电脑。
-
-### 1.4 容器是怎么找到的
-
-`Data/Application` 父目录本身列不出来（WQFiles 的注释也确认：三个容器父目录只能靠扫描）。程序按顺序尝试：
-
-| 顺序 | 方法 | 说明 |
-| --- | --- | --- |
-| ① | 手动路径 | 诊断页输入框，粘贴 WQFiles 里复制的路径（可编辑） |
-| ② | LaunchServices | `LSApplicationWorkspace` 取 `dataContainerURL`；系统 App 常常为空，但很快 |
-| ③ | containermanagerd 枚举 | class 0/2/5/7/8/10/11/13，带 `include_other_owners` |
-| ④ | 按 bundle id 查询 | `container_query_set_identifiers(class 2)`，同时试 `xpc_string` / `xpc_array` |
-| ⑤ | **`fsgetpath` 反查** | 多线程扫描卷上的 object id，把容器 UUID 还原成路径，再逐个签发扩展、读 xattr 认领 |
-| ⑥ | 父目录列举 | 通常被拒，最后试一次 |
-
-命中后验证 `<容器>/Library/Application Support/PRBPosterExtensionDataStore` 是否存在，或 xattr `com.apple.containermanager.identifier == com.apple.PosterBoard`。
-
-**⑤ 的实现要点**
-
-- `fsgetpath(fsid, inode)` 把 inode 还原成路径，不受沙箱限制；
-- 扫描上界取「自己刚建的临时文件」的 inode + 10 万（APFS 的 object id 单调递增）；
-- 4–8 个工作线程按 32768 一段并行扫，几百万个 id 通常几秒；
-- 先抽样 2000 个 id，如果只能解析到自己 App 的文件，就直接放弃并提示（说明这个版本拦住了反查）；
-- 结果写入 UserDefaults，7 天内复用；下次只扫上次上界之后的新 id（增量）。
-
-### 1.5 怎么确认自己这台能用
-
-打开「诊断 › 沙箱通道 › 自检通道」：
-
-| 输出 | 含义 |
+| 项目 | 要求 |
 | --- | --- |
-| `签名内 App Groups：group.xxx` | 签名带 App Groups，这是前提 |
-| `签名内 App Groups：无` | 重签时没勾 App Groups，一定失败，换签名工具 |
-| `✅ 找到 Library/Application Support/PRBPosterExtensionDataStore` | 扩展生效、容器正确，可以直接应用壁纸 |
-| `⚠️ 容器可读，但里面没有目标数据目录` | 找错容器，或系统布局不同，请手动填路径 |
-| `❌ 申请扩展失败：…（代码 -5）` | containermanagerd 拒绝查询，多为系统已修补或 flags 不匹配 |
-| `❌ 申请扩展失败：…（代码 -6）` | 内核拒绝签发扩展，同上 |
-| `❌ 申请扩展失败：…（代码 -8）` | 签发成功但目标打不开/写不进，通常是系统已修补 |
-| `扫了 N 个 object id，得到 0 个容器` | `fsgetpath` 被拦住，去 WQFiles 复制容器路径手填 |
-| `fsgetpath 只能解析本 App 自己的文件` | 同上，快速失败提示 |
-| `✅ 认领到 com.apple.PosterBoard：…` | 找到了，直接去点「应用所选」 |
+| 机型 | **iPhone + iPad**（`TARGETED_DEVICE_FAMILY = 1,2`），iPad 支持四方向、分屏、台前调度 |
+| 架构 | arm64 |
+| 安装 | 未签名 IPA，用 SideStore / AltStore / Sideloadly / 轻松签 / ESign 自签 |
+| 签名 | **必须带 `com.apple.security.application-groups`**，这是硬要求 |
 
-自检成功后容器路径会自动保存，后续「应用」直接用。
+签名不带 App Groups 一定失败：containermanagerd 只对 App Group 容器签发扩展，自身容器（class 2）拿不到 token。
+
+- 轻松签 / ESign：重签时勾 App Groups，填任意一个 profile 允许的 group（如 `group.com.posterdrop.shared`）；
+- Sideloadly：默认不加 App Groups，需手动在签名配置里加，否则报「签名里没有可用的 App Group」；
+- 免费 Personal Team 也能签出 App Groups，但随证书 7 天过期。
+
+App 会自动读签名里的 group，不需要手填；填了则以手填为准。
 
 ---
 
-## 二、它是怎么工作的
+## 三、使用步骤
 
-### 1. 拿到沙箱扩展（worse_query）
+1. **确认签名**：打开「诊断」，看「签名内 App Groups」是否有值。
+2. **自检**：点「自检通道」。首次会扫容器（通常几秒），成功后缓存路径，下次基本一步命中。
+3. **导入壁纸**：壁纸页 → 导入壁纸，选 `.tendies` / `.zip`，或选整个已解压的文件夹；iPad 可直接从「文件」拖进来。
+4. **应用**：勾选 → 应用所选（或单张长按 / 详情页应用）。注入完成自动 respring。
+5. **选用**：锁屏长按 → 自定义 → 墙纸；或「设置 › 墙纸」里选新出现的壁纸。
+6. **（可选）清缓存**：占空间时去「清理」页，勾选后一键清理，再 respring 重建缩略图。
+
+---
+
+## 四、工作原理
+
+### 4.1 沙箱扩展（worse_query）
 
 复现 [worse_query](https://github.com/forcequitOS/worse_query) 描述的缺陷：
 
 1. 把**自己 App Group** 的 `Library/Caches` 换成指向目标目录的符号链接（自身容器不行，必须 class 7）；
 2. 以 `class = 7 (app group)`、`part = 3 (Library/Caches)` 发起 `container_query`；
-3. containermanagerd 按 part 拼路径签发 sandbox extension 时**没有对符号链接做 realpath 校验**，扩展实际覆盖链接指向的目录；
+3. containermanagerd 按 part 拼路径签发 sandbox extension 时没有对符号链接做 realpath 校验，扩展实际覆盖链接指向的目录；
 4. `sandbox_extension_consume` 之后，本进程就拿到了目标目录的读写权；
-5. 交换前写恢复标记，结束后还原 Caches；即使进程被杀，下次启动也会恢复。
+5. 交换前写恢复标记，结束后还原 Caches；进程被杀也会在下次启动时恢复。
 
-一条实测结论（27.0.1）决定了写入逻辑：**扩展只覆盖签发时指定的那一个目录**。
-给容器根签发并不足以在两三层之下创建文件，所以每建一层目录、每写一层文件，都先给文件真正所在的目录单独签发一次。
+一条关键约束：**扩展只覆盖签发时指定的那一个目录**。给容器根签发不足以在两三层之下创建文件，所以每建一层目录、每写一层文件，都要给文件真正所在的目录单独签发一次。整批操作包在 `beginBatch / endBatch` 里，Caches 符号链接只装一次。
 
-### 2. 注入
+### 4.2 容器定位
+
+`Data/Application` 父目录列不出来，所以按顺序尝试：
+
+| 顺序 | 方法 | 说明 |
+| --- | --- | --- |
+| ① | 手动路径 | 诊断页输入框，粘贴 WQFiles 复制的路径 |
+| ② | LaunchServices | 取 `dataContainerURL`，快，但系统 App 常为空 |
+| ③ | containermanagerd 枚举 | class 0/2/5/7/8/10/11/13，带 `include_other_owners` |
+| ④ | 按 bundle id 查询 | `container_query_set_identifiers(class 2)` |
+| ⑤ | **`fsgetpath` 反查** | 多线程扫描卷上的 object id，还原容器 UUID 并逐个签发认领 |
+| ⑥ | 父目录列举 | 通常被拒，最后兜底 |
+
+`fsgetpath(fsid, inode)` 不受沙箱限制，是定位的核心：扫描上界取「自己刚建的临时文件 inode + 10 万」，按核数分段并行，几百万个 id 通常几秒；命中后读根目录 xattr `com.apple.containermanager.identifier` 确认归属。结果落缓存，7 天内复用，下次只扫增量。
+
+### 4.3 注入
 
 PosterBoard 把每张壁纸存成一组描述符目录：
 
@@ -135,136 +150,111 @@ PosterBoard 把每张壁纸存成一组描述符目录：
 └── com.apple.posterkit.provider.contents.userInfo
 ```
 
-PosterDrop 做四件事：
+程序做四件事：
 
-1. 用内置 `ZipArchive` 读中央目录，递归找出所有 descriptor 目录（判据：含 `versions/`、`providerInfo.plist`、`Wallpaper.plist` 之一）；
-2. **随机化标识**（只改纯数字标识，保留 `v6x.colorA` 这类符号标识，否则 Mercury/Unity 会失效）；
-3. 逐目录签发扩展后把目录写进去，写完对比源/目标文件数；iOS 18+ 再往独立的 `com.apple.Posters.<Name>App` 容器写一份；
-4. 写入 `com.apple.PosterBoard.unprotectedUserDefaults.plist`（`PBF_RESET_FILE_PROTECTIONS` 等键）强制重新索引，最后用 **NeoSpring** 打崩 SpringBoard 让壁纸立刻出现。
-
-数据流：
+1. 读中央目录递归找 descriptor 目录；
+2. **随机化标识**（只改纯数字标识，保留 `v6x.colorA` 这类符号标识，否则 Mercury / Unity 会失效）；
+3. 逐目录签发扩展写入，写完比对源 / 目标文件数；iOS 26+ 再往 `.Posters.<Name>App` 写一份；
+4. 写 `com.apple.PosterBoard.unprotectedUserDefaults.plist` 强制重新索引，NeoSpring 打崩 SpringBoard 让壁纸立刻出现。
 
 ```
-.tendies ──解压──> descriptor 目录 ──随机化──> 逐目录签发扩展 ──> PosterBoard 容器
-                                                              │
-                                                写 Preferences ┘──> NeoSpring respring ──> 锁屏可选
+.tendies ──解压──> descriptor 目录 ──随机化──> clonefile 写入 ──> PosterBoard 容器
+                                                          │
+                                            写 Preferences ┘──> respring ──> 锁屏可选
 ```
 
 ---
 
-## 三、为什么把 Airlift 整条删掉了
+## 五、常见问题
 
-早期版本里有两套底层同时存在：Airlift（配对 + RSD）和 worse_query。结果是：
+**Q：为什么不需要 VPN 和配对文件？**
+A：底层是 worse_query，靠 App Group 容器 `Library/Caches` 的符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成。旧版的 Airlift 隧道（需要配对 + LocalDevVPN）已经整条删除。
 
-- 没有配对记录时能走直连，但只要直连失败就会回退到隧道，日志里到处是 Airlift；
-- 隧道需要 LocalDevVPN，且 iOS 27.2 beta 3 起 AirTraffic 已被 Apple 修补；
-- 引入 127 MB 的 Rust 静态库，IPA 体积、构建步骤、故障面都翻倍。
+**Q：iOS 26 之前能用吗？支持 19–25 吗？**
+A：不能。iOS 18 之后 Apple 直接跳到 iOS 26，没有 19–25 这些版本号；而这条签发缺陷只存在于 26.0–27.2。
 
-现在的做法是只保留 worse_query：删除 `AirliftFFI`、配对页、配对存储、隧道检测、TunnelChannel 和所有 `al_*` 调用。
-现在打开 App、导入、注入、respring 的整条链路里没有任何一条需要 VPN 或配对文件。
+**Q：提示「签名里没有可用的 App Group」**
+A：重签时没勾 App Groups。用轻松签 / ESign 勾一个 group 重签；Sideloadly 需手动加。
+
+**Q：自检显示 `fsgetpath 只能解析本 App 自己的文件`**
+A：这个版本拦住了 inode 反查。用 WQFiles 打开 App Data › PosterBoard，复制容器路径，粘到诊断页输入框再自检。
+
+**Q：注入成功但壁纸里看不到**
+A：依次试「刷新壁纸缓存」→ respring → 打开墙纸设置后下拉。仍不行就看日志里的结构版本（应为 61）和 `写入 …/Preferences` 是否成功。
+
+**Q：清缓存会删掉我注入的壁纸吗？**
+A：不会。清理范围只有 `Library/Caches`、`tmp`、`SplashBoard`、`Saved Application State`，壁纸本体在 `Application Support`，不在白名单里。
+
+**Q：清理后预览变成灰块？**
+A：缩略图被清了，点清理页的「重建壁纸缩略图」respring 一次即可，壁纸本身没丢。
+
+**Q：升级系统后失效？**
+A：worse_query 支持到 27.2（含 beta 3）。27.3 及以后未验证，升级后先跑自检。
 
 ---
 
-## 四、目录结构
+## 六、目录结构
 
 ```
 PosterDrop/
 ├── project.yml                    # XcodeGen 工程定义
 ├── Config/PosterDrop.entitlements # App Groups entitlement（ad-hoc 签名用）
 ├── scripts/build-ipa.sh           # 编译 + ad-hoc 签名 + 打包 IPA
-├── .github/workflows/build.yml    # GitHub Actions：出 IPA 产物 / 发 Release
+├── .github/workflows/build.yml    # GitHub Actions：出 IPA / 发 Release
 ├── Design/AppIcon-1024.png        # 图标源文件
 └── PosterDrop/
     ├── App/
     │   ├── PosterDropApp.swift    # 入口
     │   └── AppModel.swift         # 状态与业务编排
     ├── Core/
-    │   ├── SandboxEscape.swift    # worse_query：签发 / 交换 / 缓存 / 恢复
+    │   ├── SandboxEscape.swift    # worse_query：签发 / 交换 / 批量 / 恢复
     │   ├── ContainerLocator.swift # 容器定位（含 fsgetpath 并行扫描）
-    │   ├── FileChannel.swift      # 逐目录签发 + 写入 + 校验
+    │   ├── FileChannel.swift      # clonefile 写入 + 校验
     │   ├── ArchiveInspector.swift # 解压 / descriptor 发现 / 预览图
+    │   ├── ZipArchive.swift       # 自带 zip 解析（EOCD 双路 + ZIP64）
+    │   ├── LibArchive.swift       # 系统 libarchive 兜底
     │   ├── PosterBoardInstaller.swift # 注入 + 缓存刷新
+    │   ├── CacheCleaner.swift     # 缓存清理（白名单 + 逐层签发）
+    │   ├── VPNStatus.swift        # VPN 三态检测
     │   ├── WallpaperStore.swift   # 本地库与索引
-    │   ├── WallpaperItem.swift    # 数据模型
-    │   ├── ZipArchive.swift       # 自带 zip 解析
     │   ├── Respring.swift         # NeoSpring
     │   └── LogBus.swift
-    ├── UI/                        # SwiftUI 界面（壁纸 / 诊断）
+    ├── UI/                        # SwiftUI（壁纸 / 清理 / 诊断）
     └── Resources/                 # Info.plist、图标、配色
 ```
 
 ---
 
-## 五、构建
+## 七、构建
 
-### 用 GitHub Actions（推荐，无需 Mac）
+### GitHub Actions（无需 Mac）
 
-1. 把仓库推到 GitHub；
-2. Actions 会自动跑 `Build IPA`（也可手动 `workflow_dispatch`）；
-3. 在运行记录的 **Artifacts** 里下载 `PosterDrop-ipa`，解压得到 `PosterDrop.ipa`；
-4. 打 tag（如 `v1.1.0`）推送会自动把 IPA 附到 Release。
+1. 推送仓库，Actions 会自动跑 `Build IPA`（也支持手动 `workflow_dispatch`）；
+2. 在运行记录的 **Artifacts** 下载 `PosterDrop-ipa`，解压得到 `PosterDrop.ipa`；
+3. 打 tag（如 `v1.3.0`）并推送，IPA 会自动附到 Release。
 
-工作流做的事：安装 XcodeGen → `xcodegen generate` → `build-ipa.sh Release` → 上传产物。
-构建脚本会去掉 Xcode 的空签名，再用 `Config/PosterDrop.entitlements` 做 ad-hoc 签名，让 SideStore / AltStore 重签时能读到 App Groups。
+工作流：安装 XcodeGen → `xcodegen generate` → `build-ipa.sh Release` → 上传产物。脚本会去掉 Xcode 的空签名，再用 `Config/PosterDrop.entitlements` 做 ad-hoc 签名，让重签工具能读到 App Groups。
 
-### 本地构建（需要 macOS + Xcode 16+）
+### 本地构建（macOS + Xcode 16 以上）
 
 ```bash
 brew install xcodegen
 xcodegen generate
 ./scripts/build-ipa.sh Release
-# 产物：build/PosterDrop.ipa（ad-hoc 签名，含 App Groups entitlement）
+# 产物：build/PosterDrop.ipa
 ```
 
-### 安装
-
-- SideStore / AltStore：导入 IPA，用你的 Apple ID 重签，**确认勾选/保留了 App Groups**；
-- TrollStore：直接安装；
-- Sideloadly：可以装，但需要自己在签名配置里加 App Groups，否则会报「签名里没有可用的 App Group」。
-
 ---
 
-## 六、使用步骤
+## 八、免责声明与致谢
 
-1. **确认签名**：打开「诊断」，看「签名内 App Groups」是否有值。
-2. **自检**：点「自检通道」。第一次会自动扫容器（几秒），成功后会缓存路径。
-3. **导入壁纸**：壁纸页 → 导入壁纸，可以选 `.tendies` / `.zip`，也可以选**整个已解压的文件夹**（或放进「文件 › 我的 iPhone / iPad › PosterDrop」后点「扫描文档」，递归扫描；iPad 可直接拖入）。
-4. **应用**：勾选 → 应用所选（或单张长按 / 详情页应用）。注入完成后自动 respring。
-5. **选用**：锁屏长按 → 自定义 → 墙纸，或「设置 › 墙纸」里选择新出现的壁纸。
-
----
-
-## 七、常见问题
-
-**Q：为什么不需要 VPN 和配对文件了？**
-A：底层是 worse_query，靠 App Group 容器的 `Library/Caches` 符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成。旧版的 Airlift 隧道（需要配对 + LocalDevVPN）已经整条删除。
-
-**Q：提示「签名里没有可用的 App Group」**
-A：重签时没勾 App Groups。用轻松签 / ESign 勾选一个 group 重签；免费 Personal Team 也可以。
-
-**Q：自检显示 `fsgetpath 只能解析本 App 自己的文件`**
-A：这个系统版本拦住了 inode 反查。用 WQFiles 打开 App Data › PosterBoard，复制容器路径，粘到诊断页输入框再点自检。
-
-**Q：注入成功但壁纸里看不到**
-A：依次尝试「刷新壁纸缓存」→ NeoSpring respring → 打开墙纸设置后下拉。仍不行就看日志里的结构版本（应为 61）和 `写入 …/Preferences` 是否成功。
-
-**Q：升级系统后失效？**
-A：worse_query 标注支持到 27.2（含 beta 3）。27.3 及以后未验证，升级后先跑自检；如果返回 -5 / -6 / -8，说明签发缺陷已被修补。
-
-**Q：iPad 上能用吗？界面是放大版 iPhone 吗？**
-A：能，同一份 IPA。界面是原生 iPad 布局：宽窗口下页签变侧边栏、壁纸列表双列、内容按 760pt 版心居中，并支持分屏 / 台前调度 / 从“文件”拖入壁纸包。
-
----
-
-## 八、免责声明与许可
-
-- 本项目仅用于**安全研究与个人设备定制**，请仅在你自己拥有或获授权管理的设备上使用。
-- 修改系统 App 数据可能导致壁纸异常、SpringBoard 崩溃甚至需要恢复系统，请自行承担风险，操作前备份。
-- 本项目**不涉及**绕过激活锁、绕过 Apple ID、破解付费内容等行为。
+- 仅用于**安全研究与个人设备定制**，请只在你自己拥有或获授权管理的设备上使用。
+- 修改系统 App 数据可能导致壁纸异常、SpringBoard 崩溃甚至需要恢复系统，请自行承担风险并提前备份。
+- 本项目不涉及绕过激活锁、绕过 Apple ID、破解付费内容等行为。
 
 许可与致谢：
 
 - PosterDrop 本体：MIT
-- 沙箱逃逸思路：[worse_query](https://github.com/forcequitOS/worse_query)（forcequitOS / Taj C，GPL-3.0-or-later）与 WQFiles 的公开实现；本项目的 Swift 实现按公开描述的机制重写
+- 沙箱逃逸思路：[worse_query](https://github.com/forcequitOS/worse_query)（forcequitOS / Taj C，GPL-3.0-or-later）与 WQFiles 的公开实现，本项目按公开描述的机制用 Swift 重写
 - 注入流程参考：[AirCard-iOS](https://github.com/Mak5er/AirCard-iOS)（MIT）
 - NeoSpring：[neonmodder123](https://github.com/neonmodder123) / [skadz108](https://github.com/skadz108) / [rooootdev](https://github.com/rooootdev)
