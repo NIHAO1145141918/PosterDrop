@@ -19,8 +19,11 @@ final class LibArchive {
 
     private var library: UnsafeMutableRawPointer?
     private var attempted = false
-    private(set) var isAvailable = false
+    private var available = false
     private(set) var loadError: String?
+
+    /// 第一次读取时触发 dlopen（懒加载，避免 App 启动就碰系统库）
+    var isAvailable: Bool { loadIfNeeded() }
 
     private typealias ReadNewFn = @convention(c) () -> OpaquePointer?
     private typealias SupportFn = @convention(c) (OpaquePointer?) -> Int32
@@ -49,7 +52,7 @@ final class LibArchive {
     private let ifDirectory: UInt32 = 0o040000
 
     private func loadIfNeeded() -> Bool {
-        if attempted { return isAvailable }
+        if attempted { return available }
         attempted = true
 
         let candidates = [
@@ -84,7 +87,7 @@ final class LibArchive {
             readData = dataFn
             readFree = freeFn
             errorString = symbol(handle, "archive_error_string", as: ErrorStringFn.self)
-            isAvailable = true
+            available = true
             return true
         }
 

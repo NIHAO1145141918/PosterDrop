@@ -466,7 +466,7 @@ final class ZipArchive {
 
             let record = central[local.offset]
             var compressed = record?.compressed ?? local.compressed
-            var uncompressed = record?.uncompressed ?? local.uncompressed
+            let uncompressed = record?.uncompressed ?? local.uncompressed
             let flags = record?.flags ?? local.flags
             var path = local.path
             if let record, !record.path.isEmpty { path = record.path }
