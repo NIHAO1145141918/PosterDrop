@@ -78,7 +78,7 @@ enum ArchiveInspector {
             return try inspectZip(archive)
         } catch let zipError as ZipError {
             // 中央目录解析失败（少见格式 / 文件截断）：退回「整包解压后按目录判定」
-            LogBus.shared.append("   · 原生解析失败：\(zipError.localizedDescription)，回退整包解压")
+            LogBus.shared.append("   · 结构解析未成功：\(zipError.localizedDescription)，改用整包解压判定")
             let temp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("posterdrop-fallback-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: temp) }
@@ -139,6 +139,10 @@ enum ArchiveInspector {
 
         let zip = try ZipArchive(url: archive)
         let entries = zip.entries
+        if !entries.contains(where: { !$0.isDirectory }) {
+            // 条目全是目录说明中央目录 / 本地头解析出了偏差，直接回退整包解压
+            throw ZipError.corrupt("没有文件条目（\(zip.summary)）")
+        }
 
         var isContainer = false
         var containsSQLite = false
@@ -211,7 +215,7 @@ enum ArchiveInspector {
 
     // MARK: - 解压（注入时用）
 
-    /// 把包解到指定目录。文件夹直接拷贝，zip 先走原生实现，失败再回退 Rust。
+    /// 把包解到指定目录。文件夹直接拷贝；zip 先走系统 libarchive，再回退内置解析器。
     static func extract(archive: URL, into directory: URL) throws {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: archive.path, isDirectory: &isDirectory) else {
@@ -231,17 +235,33 @@ enum ArchiveInspector {
             return
         }
 
+        // ① 系统 libarchive：支持 zstd / deflate64 / 分卷 / 奇怪前缀等全部 zip 变种
+        if LibArchive.shared.isAvailable {
+            if let count = LibArchive.shared.extract(archive: archive.path, to: directory.path), count > 0 {
+                LogBus.shared.append("   · libarchive 解压完成（\(count) 个文件）")
+                return
+            }
+            LogBus.shared.append("   · libarchive 没解出文件，改用内置解析器")
+            // 上一步可能留下半成品，清掉再来
+            try? FileManager.default.removeItem(at: directory)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+
+        // ② 内置解析器
         do {
             let zip = try ZipArchive(url: archive)
-            let count = try zip.extractAll(to: directory)
-            guard count > 0 else {
-                throw ZipError.corrupt("解压后没有任何文件")
+            let stats = try zip.extractAll(to: directory)
+            guard stats.written > 0 else {
+                throw ZipError.corrupt("解压后没有任何文件（\(zip.summary)）")
             }
-            LogBus.shared.append("   · 原生解压完成（\(count) 个文件）")
+            LogBus.shared.append("   · 内置解析器解压完成（\(stats.summaryText)；\(zip.summary)）")
             return
         } catch {
-            LogBus.shared.append("   · 解压失败：\(error.localizedDescription)")
-            throw PosterDropError.failed("无法解压 \(archive.lastPathComponent)：\(error.localizedDescription)\n文件可能不是 zip / .tendies 格式，或下载不完整。")
+            LogBus.shared.append("   · 内置解析器失败：\(error.localizedDescription)")
+            let hint = LibArchive.shared.isAvailable
+                ? ""
+                : "\n系统 libarchive 不可用（\(LibArchive.shared.loadError ?? "-")）。"
+            throw PosterDropError.failed("无法解压 \(archive.lastPathComponent)：\(error.localizedDescription)\(hint)\n文件可能不是 zip / .tendies 格式，或下载不完整。")
         }
     }
 
