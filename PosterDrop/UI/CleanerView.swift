@@ -175,7 +175,8 @@ struct CleanerView: View {
         .card(padding: 14)
     }
 
-    private var summarySubtitle: String {        if model.isScanningCache { return model.cacheScanNote }
+    private var summarySubtitle: String {
+        if model.isScanningCache { return model.cacheScanNote }
         guard let date = model.cacheScanDate else { return "还没有统计过缓存大小。" }
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
