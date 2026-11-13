@@ -404,6 +404,11 @@ struct DiagnosticsView: View {
 
             InfoRow(title: "版本", value: appVersion)
             InfoRow(title: "适配", value: DeviceLabel.isPad ? "iPadOS 26.0 – 27.2" : "iOS 26.0 – 27.2")
+            InfoRow(
+                title: "当前系统",
+                value: "iOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion)"
+                    + (AppModel.osSupport.ok ? "" : "（不在支持范围）")
+            )
             InfoRow(title: "设备", value: DeviceLabel.isPad ? "iPad · 支持分屏与台前调度" : "iPhone")
             InfoRow(title: "底层", value: "worse_query（App Group 沙箱扩展）", monospaced: true)
 

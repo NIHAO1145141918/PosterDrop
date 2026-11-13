@@ -556,8 +556,31 @@ final class AppModel: ObservableObject {
         }.value
     }
 
+    /// 支持区间：iOS 26.0 – 27.2。
+    /// Apple 在 iOS 18 之后直接跳到 iOS 26（年份命名），不存在 19–25 这几个版本号。
+    nonisolated static var osSupport: (ok: Bool, text: String) {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        let text = "\(v.majorVersion).\(v.minorVersion)"
+        if v.majorVersion < 26 { return (false, text) }
+        if v.majorVersion > 27 { return (false, text) }
+        if v.majorVersion == 27, v.minorVersion > 2 { return (false, text) }
+        return (true, text)
+    }
+
     /// 诊断页自检：只验证能不能拿到扩展、能不能看到 PosterBoard 容器
     func probeDirectChannel() async {
+        let support = Self.osSupport
+        guard support.ok else {
+            let message = """
+            ❌ 当前系统 iOS \(support.text) 不在支持范围。
+            本项目只支持 iOS 26.0 – 27.2：Apple 从 iOS 18 直接跳到 iOS 26，不存在 iOS 19–25；低于 26.0 的系统没有这条签发缺陷。
+            """
+            directStatus = message
+            LogBus.shared.append("— 直连通道自检 —")
+            LogBus.shared.append(message)
+            return
+        }
+
         directStatus = "正在申请沙箱扩展…"
         let preferred = appGroupID.trimmingCharacters(in: .whitespacesAndNewlines)
         let manual = containerPath
