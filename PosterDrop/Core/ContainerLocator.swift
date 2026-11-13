@@ -431,6 +431,26 @@ enum ContainerLocator {
         UserDefaults.standard.string(forKey: ScanCache.located(bundleID))
     }
 
+    /// 给清理页用：某个 App 上次定位到的容器路径（没有就返回 nil）。
+    static func rememberedContainerPath(for bundleID: String) -> String? {
+        rememberedPath(for: bundleID)
+    }
+
+    /// 给清理页用：拿一批已知的容器路径。
+    /// 优先复用 fsgetpath 的扫描缓存（清理不该再花几十秒扫一遍卷）；
+    /// 缓存为空时才现场扫，扫完照常写回缓存。
+    static func discoverContainers(log: @escaping (String) -> Void) -> [String] {
+        let cached = loadScanCache()
+        if !cached.isEmpty {
+            log("复用上次的扫描结果：\(cached.count) 个容器")
+            return cached
+        }
+        log("没有扫描缓存，正在反查容器 inode（第一次会慢几秒）…")
+        let fresh = scanApplicationContainers(log: log)
+        log("得到 \(fresh.count) 个容器")
+        return fresh
+    }
+
     private static func noteHit(_ path: String, bundleID: String) {
         cacheHit(path)
         UserDefaults.standard.set(SandboxEscape.canonicalPath(path), forKey: ScanCache.located(bundleID))

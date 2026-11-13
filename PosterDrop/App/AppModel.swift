@@ -80,6 +80,21 @@ final class AppModel: ObservableObject {
     /// 诊断页自检结果
     @Published var directStatus: String = ""
 
+    // MARK: 缓存清理
+
+    @Published var cacheTargets: [CacheTarget] = []
+    @Published var isScanningCache = false
+    @Published var isCleaningCache = false
+    @Published var cacheScanDate: Date?
+    @Published var cacheScanNote: String = ""
+    @Published var cacheProgress: Double = 0
+    @Published var cacheLastReport: CacheCleaner.Report?
+    /// 是否做过「其他 App」的深度扫描：决定清理页显示汇总项还是入口按钮
+    @Published var hasScannedOthers = false
+    /// 清理了 PosterBoard 缓存之后，建议重启桌面重建缩略图
+    @Published var cacheNeedsRespring = false
+
+
     private let store = WallpaperStore.shared
     private let installer = PosterBoardInstaller.shared
 
@@ -240,7 +255,7 @@ final class AppModel: ObservableObject {
     }
 
     func apply(items targets: [WallpaperItem]) async {
-        guard !isWorking else { return }
+        guard !isWorking, !isCleaningCache else { return }
         guard !targets.isEmpty else {
             banner = .error("请先勾选要应用的壁纸。")
             return
@@ -375,6 +390,144 @@ final class AppModel: ObservableObject {
             }
         } catch {
             banner = .error(error.localizedDescription)
+        }
+    }
+
+    // MARK: - 缓存清理
+
+    var cacheTotalBytes: Int64 {
+        cacheTargets.reduce(0) { $0 + $1.bytes }
+    }
+
+    var selectedCacheTargets: [CacheTarget] {
+        cacheTargets.filter { $0.isSelected && $0.isCleanable }
+    }
+
+    var selectedCacheBytes: Int64 {
+        selectedCacheTargets.reduce(0) { $0 + $1.bytes }
+    }
+
+    var canCleanCache: Bool {
+        !selectedCacheTargets.isEmpty && !isCleaningCache && !isScanningCache && !isWorking
+    }
+
+    /// 统计缓存。`includeOthers` 为 true 时才会去扫其他 App（慢，几秒）。
+    func scanCache(includeOthers: Bool = false) async {
+        guard !isWorking, !isCleaningCache, !isScanningCache else { return }
+
+        isScanningCache = true
+        cacheProgress = 0
+        cacheScanNote = includeOthers ? "正在统计所有 App 的缓存…" : "正在统计缓存大小…"
+
+        // 这里不主动定位容器：清理页应该秒开。没有路径时只统计本 App 的部分，
+        // 页面上会提示先去「诊断」探测一次。
+        let container = containerPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let group = resolvedAppGroup
+        let target = container
+        let previousSelection = Set(cacheTargets.filter { $0.isSelected }.map { $0.id })
+        let previousOther = cacheTargets.first { $0.scope == .other }
+
+        LogBus.shared.append("— 统计缓存 —")
+        let started = Date()
+
+        var scanned = await Task.detached(priority: .userInitiated) { () -> [CacheTarget] in
+            CacheCleaner.shared.scan(
+                container: target.isEmpty ? nil : target,
+                group: group,
+                includeOthers: includeOthers,
+                log: { line in LogBus.shared.append(line) }
+            )
+        }.value
+
+        // 这次没做深度扫描时，把上次那一项保留下来，别让它凭空消失
+        if !includeOthers, let previousOther {
+            scanned.append(previousOther)
+        }
+
+        // 重扫后保住用户之前的勾选
+        for index in scanned.indices where previousSelection.contains(scanned[index].id) {
+            if scanned[index].isCleanable {
+                scanned[index].isSelected = true
+            }
+        }
+
+        cacheTargets = scanned
+        cacheScanDate = Date()
+        cacheProgress = 0
+        cacheScanNote = ""
+        isScanningCache = false
+        if includeOthers { hasScannedOthers = true }
+
+        LogBus.shared.append(String(
+            format: "   共 %@，用时 %.1f 秒",
+            CacheFormat.size(cacheTotalBytes),
+            Date().timeIntervalSince(started)
+        ))
+    }
+
+    func toggleCacheTarget(_ id: String) {
+        guard let index = cacheTargets.firstIndex(where: { $0.id == id }) else { return }
+        guard cacheTargets[index].isCleanable else { return }
+        cacheTargets[index].isSelected.toggle()
+    }
+
+    func toggleAllCache(in scope: CacheTarget.Scope) {
+        let indexes = cacheTargets.indices.filter {
+            cacheTargets[$0].scope == scope && cacheTargets[$0].isCleanable
+        }
+        guard !indexes.isEmpty else { return }
+        let allOn = indexes.allSatisfy { cacheTargets[$0].isSelected }
+        for index in indexes {
+            cacheTargets[index].isSelected = !allOn
+        }
+    }
+
+    func cleanCache() async {
+        guard !isWorking, !isCleaningCache, !isScanningCache else { return }
+
+        let picked = selectedCacheTargets
+        guard !picked.isEmpty else {
+            banner = .info("没有勾选可清理的项目。")
+            return
+        }
+
+        isCleaningCache = true
+        cacheProgress = 0
+        let group = resolvedAppGroup
+        let planned = selectedCacheBytes
+
+        LogBus.shared.append("— 清理缓存：\(picked.count) 项，共 \(CacheFormat.size(planned)) —")
+
+        let report = await Task.detached(priority: .userInitiated) { () -> CacheCleaner.Report in
+            CacheCleaner.shared.clean(picked, group: group) { value in
+                Task { @MainActor in
+                    self.cacheProgress = value
+                }
+            }
+        }.value
+
+        // 清干净的项直接归零，不必再扫一遍
+        for index in cacheTargets.indices where report.cleanedIDs.contains(cacheTargets[index].id) {
+            cacheTargets[index].bytes = 0
+            cacheTargets[index].files = 0
+            cacheTargets[index].state = .empty
+            cacheTargets[index].isSelected = false
+        }
+
+        cacheProgress = 0
+        isCleaningCache = false
+        cacheLastReport = report
+        cacheNeedsRespring = picked.contains { $0.scope == .posterBoard && report.cleanedIDs.contains($0.id) }
+
+        LogBus.shared.append("✅ \(report.text)，用时 \(String(format: "%.1f", report.elapsed)) 秒")
+        for failure in report.failures.prefix(6) {
+            LogBus.shared.append("   · \(failure)")
+        }
+
+        if report.failures.isEmpty {
+            banner = .success("\(report.text)。壁纸本体没有被删；如果桌面显示异常，去「诊断」页点一次「刷新缓存」。")
+        } else {
+            banner = .error(report.text + "\n" + report.failures.prefix(2).joined(separator: "\n"))
         }
     }
 

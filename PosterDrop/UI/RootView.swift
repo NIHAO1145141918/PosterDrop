@@ -41,11 +41,17 @@ struct RootView: View {
                 }
                 .tag(0)
 
+            CleanerView()
+                .tabItem {
+                    Label("清理", systemImage: "trash")
+                }
+                .tag(1)
+
             DiagnosticsView()
                 .tabItem {
                     Label("诊断", systemImage: "wrench.and.screwdriver")
                 }
-                .tag(1)
+                .tag(2)
         }
     }
 }
