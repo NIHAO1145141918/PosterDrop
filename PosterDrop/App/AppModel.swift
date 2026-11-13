@@ -254,6 +254,12 @@ final class AppModel: ObservableObject {
         LogBus.shared.clear()
         LogBus.shared.append("==== PosterDrop 开始注入 ====")
         LogBus.shared.append("底层：worse_query 沙箱扩展（无需配对 / 无需 VPN）")
+        let startedAt = Date()
+        // 状态检测放到后台，不挡注入；当前通道不走 VPN，只把真实情况写进日志
+        Task.detached(priority: .utility) {
+            let report = VPNStatus.cached()
+            LogBus.shared.append("· VPN 检测：\(report.logLine)")
+        }
 
         do {
             busyLabel = "正在定位 PosterBoard 容器…"
@@ -277,6 +283,8 @@ final class AppModel: ObservableObject {
                 channel: channel,
                 options: options
             )
+            let cost = Date().timeIntervalSince(startedAt)
+            LogBus.shared.append(String(format: "⏱ 注入总耗时 %.1f 秒", cost))
             finishInstall(report)
         } catch {
             isWorking = false

@@ -14,6 +14,8 @@ struct DiagnosticsView: View {
     @ObservedObject private var logBus = LogBus.shared
 
     @State private var copiedHint: String?
+    @State private var vpnReport: VPNReport?
+    @State private var vpnChecking = false
 
     var body: some View {
         NavigationStack {
@@ -116,6 +118,74 @@ struct DiagnosticsView: View {
         .card()
     }
 
+    // MARK: - VPN 状态
+
+    /// 只报告真实状态：以「能不能连上 10.7.0.1:49152」为准，
+    /// 有 utun 网卡但端口不通会明确写成「未连通」，不再误判。
+    private var vpnRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(vpnColor)
+                    .frame(width: 8, height: 8)
+                Text(vpnReport?.title ?? "VPN 状态未检测")
+                    .font(.caption.weight(.medium))
+                Spacer()
+                Button {
+                    checkVPN()
+                } label: {
+                    if vpnChecking {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Text("检测")
+                            .font(.caption2.weight(.semibold))
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(Theme.accent)
+                .disabled(vpnChecking)
+            }
+
+            if let report = vpnReport {
+                Text("\(report.address) \(report.detail) · 隧道网卡 \(report.interfaces.isEmpty ? "无" : report.interfaces.joined(separator: "/")) · \(String(format: "%.2f", report.elapsed))s")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("当前通道是本地直写，不需要 VPN；这里只是把真实状态说清楚。VPN 开着也不会更快——隧道要多绕一次本机 loopback。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+        .onAppear { if vpnReport == nil { checkVPN() } }
+    }
+
+    private var vpnColor: Color {
+        guard let state = vpnReport?.state else { return .secondary }
+        switch state {
+        case .reachable: return .green
+        case .interfaceOnly: return .orange
+        case .off: return .secondary
+        }
+    }
+
+    private func checkVPN() {
+        guard !vpnChecking else { return }
+        vpnChecking = true
+        Task {
+            let report = await Task.detached(priority: .userInitiated) { VPNStatus.probe() }.value
+            vpnReport = report
+            vpnChecking = false
+        }
+    }
+
     // MARK: - 直连通道
 
     private var directCard: some View {
@@ -148,6 +218,8 @@ struct DiagnosticsView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            vpnRow
 
             Button {
                 Task { await model.probeDirectChannel() }

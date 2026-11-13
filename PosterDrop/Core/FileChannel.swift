@@ -147,6 +147,14 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
             }
         }
 
+        // APFS 同卷直接把整棵目录树克隆过去：O(1) 元数据操作，
+        // 不再「读 500 MB + 写 500 MB」。clonefile 要求目标不存在，所以放在建目录之前。
+        if clonefile(folder, destination, 0) == 0 {
+            // 克隆是原子的元数据操作，成功即整棵树都在；不用再数文件
+            // （数文件还要给目标目录另签一次扩展，没必要）。
+            return
+        }
+
         try ensureDirectory(destination)
         try copyContents(from: folder, to: destination)
 
@@ -213,6 +221,10 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
         defer { close(input) }
 
         unlink(destination)
+        // 同一卷（都在 Data 卷上）优先做 COW 克隆，不复制任何字节
+        if clonefile(source, destination, 0) == 0 {
+            return
+        }
         var output = open(destination, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o644)
         if output < 0 && (errno == EPERM || errno == EACCES) {
             // 扩展可能在这一轮被淘汰：重新签发再试一次
@@ -246,7 +258,8 @@ final class DirectChannel: FileChannel, @unchecked Sendable {
                 written += count
             }
         }
-        fsync(output)
+        // 不再每个文件 fsync：几百个文件各刷一次盘能吃掉好几秒，
+        // 注入结束后由调用方统一 sync 一次即可。
     }
 
     private func countFiles(in root: String) -> Int {

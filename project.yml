@@ -9,8 +9,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.1.1"
-    CURRENT_PROJECT_VERSION: "16"
+    MARKETING_VERSION: "1.2.0"
+    CURRENT_PROJECT_VERSION: "17"
     # 1 = iPhone, 2 = iPad：通用 App，iPad 上支持分屏 / Stage Manager 窗口缩放。
     TARGETED_DEVICE_FAMILY: "1,2"
     CODE_SIGN_STYLE: Automatic

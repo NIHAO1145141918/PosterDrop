@@ -145,7 +145,7 @@ final class PosterBoardInstaller {
                         var dual = dualChannels[extensionID]
                         if dual == nil {
                             let hit = try? await runOffMain {
-                                ContainerLocator.find(bundleID: modernID, group: dualGroup, manual: nil, log: { line in
+                                ContainerLocator.find(bundleID: modernID, group: dualGroup, manual: nil, deepScan: false, log: { line in
                                     self.emit(log, "  · " + line)
                                 })
                             }

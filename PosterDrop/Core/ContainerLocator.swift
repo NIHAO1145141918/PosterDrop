@@ -47,7 +47,15 @@ enum ContainerLocator {
     }
 
     /// 同一个扫描结果可以认领任意 App 的容器（dual inject 用）。
-    static func find(bundleID: String, group: String, manual: String?, log: @escaping (String) -> Void) -> Hit? {
+    /// - Parameter deepScan: 为 false 时只走「缓存 / LaunchServices / 枚举 / 按 id 查询」这些快路径，
+    ///   不触发 fsgetpath 全盘扫描。dual inject 这类「找不到就算了」的场景用它，避免一次几十秒。
+    static func find(
+        bundleID: String,
+        group: String,
+        manual: String?,
+        deepScan: Bool = true,
+        log: @escaping (String) -> Void
+    ) -> Hit? {
         let started = Date()
         func stamp(_ text: String) -> String {
             String(format: "%5.2fs  %@", Date().timeIntervalSince(started), text)
@@ -102,6 +110,11 @@ enum ContainerLocator {
         if let path = queryByIdentifier(bundleID: bundleID), verify(path: path, group: group, target: bundleID, log: { log(stamp($0)) }) {
             noteHit(path, bundleID: bundleID)
             return done(Hit(path: SandboxEscape.canonicalPath(path), source: "bundle id 查询"))
+        }
+
+        guard deepScan else {
+            log(stamp("⏭ 只做快路径，跳过全盘扫描（\(bundleID)）"))
+            return nil
         }
 
         log(stamp("⑤ fsgetpath 反查容器 inode（第一次要扫一遍卷，之后走增量）…"))
