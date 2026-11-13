@@ -196,7 +196,7 @@ final class CacheCleaner: @unchecked Sendable {
                 scope: .app,
                 title: "解包暂存",
                 detail: "导入壁纸时解压出的临时目录，任务中断会残留在这里",
-                paths: [NSTemporaryDirectory()],
+                paths: [SandboxEscape.canonicalPath(NSTemporaryDirectory())],
                 prefixFilter: "posterdrop-",
                 needsEscape: false,
                 recommended: true,
@@ -211,7 +211,7 @@ final class CacheCleaner: @unchecked Sendable {
                     scope: .app,
                     title: "本 App 缓存",
                     detail: "索引与界面缓存，删掉后会自动重建",
-                    paths: [caches.path],
+                    paths: [SandboxEscape.canonicalPath(caches.path)],
                     prefixFilter: nil,
                     needsEscape: false,
                     recommended: true,
@@ -468,6 +468,16 @@ final class CacheCleaner: @unchecked Sendable {
         report: inout Report
     ) {
         guard depth <= Self.maxDepth else { return }
+
+        // 根目录本身是符号链接时直接放弃：opendir 会跟进去，等于把链接目标删了。
+        // （正常情况下白名单路径不可能是链接，这里是最后一道保险）
+        if depth == 0 {
+            var rootInfo = stat()
+            if lstat(dir, &rootInfo) == 0, (rootInfo.st_mode & S_IFMT) == S_IFLNK {
+                report.failures.append("拒绝清理符号链接：\(dir)")
+                return
+            }
+        }
 
         // 删子项要求「父目录」可写。签发一次覆盖整棵子树，失败时再补。
         if let group {

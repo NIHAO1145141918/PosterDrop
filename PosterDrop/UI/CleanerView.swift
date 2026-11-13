@@ -193,30 +193,52 @@ struct CleanerView: View {
         )
     }
 
+    @ViewBuilder
     private var posterBoardSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if model.containerPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("PosterBoard 容器还没定位，先在「诊断」页自动探测一次，这里才能统计壁纸缓存。")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 4)
-            }
+        let targets = model.cacheTargets.filter { $0.scope == .posterBoard }
 
-            groupCard(
-                title: "PosterBoard 壁纸",
+        if targets.isEmpty {
+            hintCard(
                 icon: "photo.stack",
-                targets: model.cacheTargets.filter { $0.scope == .posterBoard }
+                title: "PosterBoard 壁纸",
+                text: "还没定位到 PosterBoard 容器。去「诊断」页点一次「自动探测」，回来刷新就能统计壁纸缓存。"
             )
+        } else {
+            groupCard(title: "PosterBoard 壁纸", icon: "photo.stack", targets: targets)
         }
     }
 
+    @ViewBuilder
     private var otherSection: some View {
-        groupCard(
-            title: "其他 App",
-            icon: "square.grid.2x2",
-            targets: model.cacheTargets.filter { $0.scope == .other }
-        )
+        let targets = model.cacheTargets.filter { $0.scope == .other }
+
+        if targets.isEmpty {
+            hintCard(
+                icon: "square.grid.2x2",
+                title: "其他 App",
+                text: "这次没有扫到其他 App 的缓存。可以下拉刷新再试，或先在「诊断」页让容器扫描跑一次。"
+            )
+        } else {
+            groupCard(title: "其他 App", icon: "square.grid.2x2", targets: targets)
+        }
+    }
+
+    private func hintCard(icon: String, title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+            }
+            Text(text)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .card()
     }
 
     private var deepScanCard: some View {
@@ -421,6 +443,7 @@ struct CleanerView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(Theme.accent)
+            .disabled(model.isWorking || model.isScanningCache || model.isCleaningCache)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 24)

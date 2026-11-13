@@ -416,6 +416,7 @@ final class AppModel: ObservableObject {
         guard !isWorking, !isCleaningCache, !isScanningCache else { return }
 
         isScanningCache = true
+        defer { isScanningCache = false }
         cacheProgress = 0
         cacheScanNote = includeOthers ? "正在统计所有 App 的缓存…" : "正在统计缓存大小…"
 
@@ -492,6 +493,7 @@ final class AppModel: ObservableObject {
         }
 
         isCleaningCache = true
+        defer { isCleaningCache = false }
         cacheProgress = 0
         let group = resolvedAppGroup
         let planned = selectedCacheBytes
