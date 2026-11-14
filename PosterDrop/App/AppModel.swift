@@ -610,6 +610,29 @@ final class AppModel: ObservableObject {
         for line in result.report.split(separator: "\n") {
             LogBus.shared.append(String(line))
         }
+
+        // 定位链路的第一级探针：LSApplicationProxy 到底给不给路径。
+        // 不给的话，之后每次找不到容器都只能退回枚举，这一点必须在自检里能看见。
+        let launchReport = await Task.detached(priority: .utility) { () -> String in
+            let census = LaunchServices.census()
+            var lines = [
+                "— LaunchServices 探针 —",
+                "可见 App \(census.total) 个，其中 \(census.withContainer) 个带容器路径"
+            ]
+            if let direct = LaunchServices.containerPath(for: ContainerLocator.posterBoardBundleID) {
+                lines.append("PosterBoard 路径：\(direct)")
+            } else {
+                lines.append("PosterBoard 路径：未返回（dataContainerURL 被系统裁剪）")
+            }
+            if let name = LaunchServices.displayName(for: ContainerLocator.posterBoardBundleID) {
+                lines.append("显示名：\(name)")
+            }
+            return lines.joined(separator: "\n")
+        }.value
+
+        for line in launchReport.split(separator: "\n") {
+            LogBus.shared.append(String(line))
+        }
     }
 
     // MARK: - Respring
