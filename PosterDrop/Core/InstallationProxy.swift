@@ -174,11 +174,12 @@ enum InstallationProxy {
                 return nil
             }
             let container = Self.containerPath(in: entry)
+            let displayName = (entry["CFBundleDisplayName"] as? String)
+                ?? (entry["CFBundleName"] as? String)
             return InstalledApp(
                 bundleID: bundleID,
                 container: container,
-                name: entry["CFBundleDisplayName"] as? String
-                    ?? entry["CFBundleName"] as? String,
+                name: displayName,
                 applicationType: entry["ApplicationType"] as? String
             )
         }
