@@ -386,6 +386,9 @@ enum SandboxEscape {
                         lastCode = failure.code
                         if failure.code == -5 || failure.code == -6 { refused += 1 }
                         continue
+                    } catch {
+                        lastCode = -9
+                        continue
                     }
 
                     guard opens(canonical) else {
@@ -651,9 +654,9 @@ enum SandboxEscape {
         }
         defer { freeQuery(query) }
 
-        setClass(query, containerClass)
-        let value = xpcString(identifier)
-        setGroups(query, value)
+        setClass(query, containerClassAppGroup)
+        let groupValue = xpcString(group)
+        setGroups(query, groupValue)
         setPart(query, partCaches)
         setFlags(query, flags)
 
