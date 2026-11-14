@@ -461,7 +461,10 @@ final class CacheCleaner: @unchecked Sendable {
             return indexed
         }
 
-        let containers = ContainerLocator.discoverContainers(log: log)
+        // 补扫单独给 90 秒：全卷 1.2 亿个 object id 按 2μs 算要 250 秒，
+        // 但前 30% 就覆盖了六成 App。到点先用已扫到的出结果，剩下的下次接着补。
+        let discoverDeadline = Date().addingTimeInterval(90)
+        let containers = ContainerLocator.discoverContainers(log: log, deadline: discoverDeadline)
         guard !containers.isEmpty else {
             log("没有发现其他 App 的容器，跳过")
             return []

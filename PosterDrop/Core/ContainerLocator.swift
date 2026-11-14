@@ -397,7 +397,8 @@ enum ContainerLocator {
     private static func scanApplicationContainers(
         log: @escaping (String) -> Void,
         from explicitFirst: Int64? = nil,
-        to explicitUpper: Int64? = nil
+        to explicitUpper: Int64? = nil,
+        deadline: Date? = nil
     ) -> [String] {
         guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fsgetpath") else {
             log("   ⚠️ 系统没有 fsgetpath")
@@ -435,6 +436,8 @@ enum ContainerLocator {
 
         var nextChunk: Int64 = 0
         var hits = Set<String>()
+        /// 被时间预算打断：这一轮没扫完，不能推进 limit，否则下次会以为整段扫过了
+        var aborted = false
         let lock = NSLock()
         // fsgetpath 是阻塞 syscall，时间几乎全花在内核的 vnode 查找上（无效 id 也一样贵），
         // 所以超订线程是划算的：8 → 32，实测能把 6 核机器上的 I/O 等待压下去。
@@ -466,6 +469,15 @@ enum ContainerLocator {
 
                     while true {
                         lock.lock()
+                        if aborted {
+                            lock.unlock()
+                            break
+                        }
+                        if let deadline, Date() >= deadline {
+                            aborted = true
+                            lock.unlock()
+                            break
+                        }
                         let chunk = nextChunk
                         nextChunk += 1
                         lock.unlock()
@@ -520,7 +532,12 @@ enum ContainerLocator {
         // 每扫完一段都落盘：limit 记「已经扫到这里」，路径是全量合并。
         // 分段时只扫了前 10%，如果不写，那 131 个容器就随返回值一起丢了
         // （清理页只认缓存，不认本次调用的返回值）。
-        saveScanCache(merged, limit: upper)
+        if aborted {
+            // 时间预算用完：只合并路径，limit 原地不动，下次还从这一段继续
+            saveScanPaths(merged)
+        } else {
+            saveScanCache(merged, limit: upper)
+        }
         return Array(hits)
     }
 
@@ -577,7 +594,10 @@ enum ContainerLocator {
     /// 给清理页用：拿一批已知的容器路径。
     /// 优先复用 fsgetpath 的扫描缓存（清理不该再花几十秒扫一遍卷）；
     /// 缓存为空时才现场扫，扫完照常写回缓存。
-    static func discoverContainers(log: @escaping (String) -> Void) -> [String] {
+    static func discoverContainers(
+        log: @escaping (String) -> Void,
+        deadline: Date? = nil
+    ) -> [String] {
         var cached = loadScanCache()
 
         // 1.4.8 的分段扫描只推进了 limit、没有保存路径，缓存可能只剩 noteHit 写的一两条。
@@ -607,19 +627,30 @@ enum ContainerLocator {
 
         // 补扫也分段推进：每段结束都会写缓存，中途退出不会白扫
         var all = cached
+        var stopped = false
         if ceiling > 1_000_000 {
             var boundaryFrom: Int64 = scanned
             for fraction in scanStages {
+                if let deadline, Date() >= deadline {
+                    stopped = true
+                    break
+                }
                 let boundary = min(ceiling, max(boundaryFrom, Int64(Double(ceiling) * fraction)))
                 guard boundary > boundaryFrom else { continue }
-                let stage = scanApplicationContainers(log: log, from: boundaryFrom + 1, to: boundary)
+                let stage = scanApplicationContainers(
+                    log: log, from: boundaryFrom + 1, to: boundary, deadline: deadline
+                )
                 all = Array(Set(all + stage))
                 boundaryFrom = boundary
             }
         } else {
-            all = Array(Set(all + scanApplicationContainers(log: log)))
+            all = Array(Set(all + scanApplicationContainers(log: log, deadline: deadline)))
         }
-        log("得到 \(all.count) 个容器")
+        if stopped {
+            log("时间预算到，先用已扫到的 \(all.count) 个容器（剩余部分下次清理继续）")
+        } else {
+            log("得到 \(all.count) 个容器")
+        }
         return all
     }
 
@@ -644,6 +675,14 @@ enum ContainerLocator {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: ScanCache.date) != nil else { return nil }
         return (defaults.object(forKey: ScanCache.limit) as? NSNumber)?.int64Value
+    }
+
+    /// 只更新路径，不推进 limit。中途放弃的扫描用它——否则 limit 跳到段尾，
+    /// 没扫到的那半段永远不会被补回来。
+    private static func saveScanPaths(_ paths: [String]) {
+        let defaults = UserDefaults.standard
+        defaults.set(paths, forKey: ScanCache.paths)
+        defaults.set(Date(), forKey: ScanCache.date)
     }
 
     private static func saveScanCache(_ paths: [String], limit: Int64) {
