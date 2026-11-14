@@ -220,13 +220,17 @@ final class CacheCleaner: @unchecked Sendable {
     /// 单个目标的遍历预算。改成 fd 相对遍历 + getattrlistbulk 之后，单条成本从
     /// 一次全路径 stat 降到百纳秒级，原来 5 万的预算可以放宽到 30 万而且更快。
     private static let measureBudget = 300_000
-    /// 整轮扫描的时间上限。到点就不再开新容器，已经在跑的子树自行收尾。
-    /// 30 秒是产品要求，这里留 10 秒给签发、UI 刷新和收尾。
-    private static let scanTimeBudget: TimeInterval = 20
+    /// 整轮扫描的时间上限。到点后不再开新容器，但**已经在排队的容器不会被丢弃**，
+    /// 而是降级成只统计 Caches + tmp（这两项占了这类清理的九成以上）。
+    /// 上一版到点直接跳过，排在后面的容器（UUID 顺序恰好靠后的大 App）全部消失，
+    /// 这是「只能清掉几十 MB」最直接的原因。
+    private static let scanTimeBudget: TimeInterval = 30
+    /// 降级模式下仍然统计的目录：两项，成本约为完整统计的四分之一。
+    private static let degradedEntries: Set<String> = ["Library/Caches", "tmp"]
     /// 深度扫描最多看多少个容器。父目录扩展可用时基本等于全量。
-    private static let otherScanLimit = 400
-    /// 父目录扩展签不出来时只能逐个签发（每个约 80–120ms），上限压到 120 才能守住 30 秒。
-    private static let otherScanLimitSlow = 120
+    private static let otherScanLimit = 600
+    /// 父目录扩展签不出来时只能逐个签发（每个约 80–120ms），上限压到 400，超时后降级统计。
+    private static let otherScanLimitSlow = 400
     /// 列表里最多展示多少个 App（按占用从大到小）。
     private static let otherDisplayLimit = 60
 
@@ -401,12 +405,12 @@ final class CacheCleaner: @unchecked Sendable {
 
     /// 每个 App 一项：只把真实存在的白名单目录塞进去，扫完按大小排序。
     ///
-    /// 两条路：
-    ///   · 父目录扩展签出来了（绝大多数情况）——打开一次 Application 目录，
-    ///     之后每个容器都是 openat 直接进。不再逐个签发、不再拼全路径，
-    ///     所有容器可以一次性铺开并行，这是本轮提速的主要来源。
-    ///   · 签不出来——退回逐个签发（每个 80–120ms），上限压到 120 并分批，
-    ///     保证不超时。
+    /// 三条路，按代价从低到高：
+    ///   · 父目录扩展签出来了——打开一次 Application 目录，之后每个容器都是 openat
+    ///     直接进，正常路径零 XPC；
+    ///   · 父目录签不出来但容器索引可用——让 containermanagerd 直接把每个容器挂到
+    ///     本进程沙箱上，一次激活换一个能 open 的路径，不必走 Caches 交换；
+    ///   · 都不行——退回逐个签发（每个 80–120ms），分批跑。
     private func scanOtherApps(
         group: String,
         deadline: Date,
@@ -416,9 +420,9 @@ final class CacheCleaner: @unchecked Sendable {
 
         // 带写权限签父目录：一次探针，换来之后所有容器的打开与删除都不用再补签。
         let rootGranted = ContainerLocator.grantApplicationRoot(group: group, requireWrite: true)
-        if rootGranted {
-            log("容器父目录已授权（含写权限）：整轮不再逐个签发扩展")
-        }
+        log(rootGranted
+            ? "容器父目录已授权（含写权限）：整轮不再逐个签发扩展"
+            : "容器父目录授权失败：改走索引激活 / 逐个签发")
 
         let posterCanonical = ContainerLocator
             .rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
@@ -438,6 +442,16 @@ final class CacheCleaner: @unchecked Sendable {
             }
         }
 
+        // 第二条路：索引激活。枚举一次、激活一批，之后 open 全路径即可。
+        if let indexed = scanContainersIndexed(
+            poster: posterCanonical,
+            started: started,
+            deadline: deadline,
+            log: log
+        ) {
+            return indexed
+        }
+
         let containers = ContainerLocator.discoverContainers(log: log)
         guard !containers.isEmpty else {
             log("没有发现其他 App 的容器，跳过")
@@ -451,6 +465,78 @@ final class CacheCleaner: @unchecked Sendable {
             deadline: deadline,
             log: log
         )
+    }
+
+    // MARK: 索引路径
+
+    /// 用 containermanagerd 的索引直接拿到「bundleID + 路径 + 访问权」。
+    ///
+    /// 这是 3105 的主路径：`container_query` 按 class 2 枚举，再对每个容器
+    /// 调一次 `container_object_sandbox_extension_activate`。省掉 Caches 交换，
+    /// 也就省掉每次 80–120ms 的 XPC 往返。
+    /// 签名里没有 container-manager 权限时整条路返回 nil，调用方回落。
+    private func scanContainersIndexed(
+        poster: String?,
+        started: Date,
+        deadline: Date,
+        log: @escaping (String) -> Void
+    ) -> [CacheTarget]? {
+        guard let entries = ContainerIndex.snapshot(activate: true) else { return nil }
+        guard !entries.isEmpty else { return nil }
+
+        let candidates = entries
+            .filter { $0.path != poster }
+            .prefix(Self.otherScanLimit)
+        guard !candidates.isEmpty else { return nil }
+
+        var slots = [CacheTarget?](repeating: nil, count: candidates.count)
+        let total = candidates.count
+        let opened = Counter()
+        let denied = Counter()
+        let degraded = Counter()
+        let cursor = Counter()
+        let workerCount = min(max(2, ProcessInfo.processInfo.activeProcessorCount), 8)
+
+        Array(candidates).withUnsafeBufferPointer { list in
+            slots.withUnsafeMutableBufferPointer { buffer in
+                DispatchQueue.concurrentPerform(iterations: workerCount) { _ in
+                    while true {
+                        let index = cursor.next()
+                        guard index < list.count else { return }
+                        let entry = list[index]
+
+                        guard let fd = FileTree.openDirectory(entry.path) else {
+                            denied.increment()
+                            continue
+                        }
+                        opened.increment()
+                        defer { close(fd) }
+
+                        let late = Date() >= deadline
+                        if late { degraded.increment() }
+                        buffer[index] = makeOtherTarget(
+                            containerFD: fd,
+                            path: entry.path,
+                            identifier: entry.identifier,
+                            degraded: late,
+                            deadline: deadline
+                        )
+                    }
+                }
+            }
+        }
+
+        let results = slots.compactMap { $0 }
+        log(String(
+            format: "其他 App（索引）：%d 个容器，打开 %d 个、被拒 %d 个，%d 个有缓存，%d 个降级统计，用时 %.1f 秒",
+            total,
+            opened.value,
+            denied.value,
+            results.count,
+            degraded.value,
+            Date().timeIntervalSince(started)
+        ))
+        return results
     }
 
     // MARK: 快路径
@@ -478,49 +564,90 @@ final class CacheCleaner: @unchecked Sendable {
             return nil
         }
 
-        guard !names.isEmpty else { return [] }
+        guard !names.isEmpty else {
+            log("父目录打得开但列不出条目（container 隔离），退回逐个签发")
+            return nil
+        }
         let limit = min(names.count, Self.otherScanLimit)
 
+        // bundleID 映射：容器目录名是 UUID，读不了索引就只能显示 UUID。
+        // ContainerIndex 一次枚举就能拿到 UUID → bundleID，失败返回 nil，不影响统计。
+        let identifiers = containerIdentifiers(rootPath: rootPath, log: log)
+
         var slots = [CacheTarget?](repeating: nil, count: limit)
-        let skipped = Counter()
+        let opened = Counter()
+        let closedDenied = Counter()
+        let degraded = Counter()
+
+        let workerCount = min(max(2, ProcessInfo.processInfo.activeProcessorCount), 8)
+        let cursor = Counter()
 
         slots.withUnsafeMutableBufferPointer { buffer in
-            DispatchQueue.concurrentPerform(iterations: limit) { index in
-                // 时间到就不再开新容器，已经在跑的自然结束
-                if Date() >= deadline {
-                    skipped.increment()
-                    return
+            DispatchQueue.concurrentPerform(iterations: workerCount) { _ in
+                while true {
+                    let index = cursor.next()
+                    guard index < limit else { return }
+
+                    let name = names[index]
+                    let path = rootPath + "/" + name
+                    if let poster, path == poster { continue }
+
+                    guard let containerFD = FileTree.openSubdirectory(rootFD, name) else {
+                        closedDenied.increment()
+                        continue
+                    }
+                    opened.increment()
+                    defer { close(containerFD) }
+
+                    // 时间到不再丢弃容器：降级成只统计 Caches + tmp。
+                    let late = Date() >= deadline
+                    if late { degraded.increment() }
+
+                    buffer[index] = makeOtherTarget(
+                        containerFD: containerFD,
+                        path: path,
+                        identifier: identifiers?[name],
+                        degraded: late,
+                        deadline: deadline
+                    )
                 }
-
-                let name = names[index]
-                let path = rootPath + "/" + name
-                if let poster, path == poster { return }
-
-                guard let containerFD = FileTree.openSubdirectory(rootFD, name) else { return }
-                defer { close(containerFD) }
-
-                buffer[index] = makeOtherTarget(
-                    containerFD: containerFD,
-                    path: path,
-                    deadline: deadline
-                )
             }
         }
 
         let results = slots.compactMap { $0 }
         var reasons: [String] = []
         if names.count > limit { reasons.append("\(names.count - limit) 个超出单次上限") }
-        let missed = skipped.value
-        if missed > 0 { reasons.append("\(missed) 个超时跳过") }
         let note = reasons.isEmpty ? "" : "（" + reasons.joined(separator: "，") + "）"
         log(String(
-            format: "其他 App：%d 个容器，%d 个有缓存，用时 %.1f 秒%@",
+            format: "其他 App：%d 个容器，打开 %d 个、被拒 %d 个，%d 个有缓存，%d 个降级统计，用时 %.1f 秒%@",
             limit,
+            opened.value,
+            closedDenied.value,
             results.count,
+            degraded.value,
             Date().timeIntervalSince(started),
             note
         ))
         return results
+    }
+
+    /// 用 containermanagerd 的索引把 UUID 目录名换成 bundleID。
+    /// 拿不到就返回 nil —— 只是标题变回 UUID，统计逻辑不受影响。
+    private func containerIdentifiers(rootPath: String, log: @escaping (String) -> Void) -> [String: String]? {
+        guard let entries = ContainerIndex.snapshot() else {
+            log("容器索引不可用（签名没有 container-manager 权限），标题显示 UUID")
+            return nil
+        }
+        var map: [String: String] = [:]
+        map.reserveCapacity(entries.count)
+        for entry in entries {
+            guard let identifier = entry.identifier else { continue }
+            let name = (entry.path as NSString).lastPathComponent
+            guard !name.isEmpty else { continue }
+            map[name] = identifier
+        }
+        log("容器索引：\(entries.count) 个容器，\(map.count) 个带 bundleID")
+        return map.isEmpty ? nil : map
     }
 
     // MARK: 慢路径（父目录签不出来）
@@ -548,11 +675,26 @@ final class CacheCleaner: @unchecked Sendable {
         // 内核能同时挂的扩展有上限（192），一次签完会把前面的挤掉，所以分批
         let batchSize = 24
         var offset = 0
+        var degradedCount = 0
+        // 路径 → bundleID。慢路径是逐个签发，正好可以顺手用索引把标题补上。
+        let identifierMap: [String: String]? = {
+            guard let entries = ContainerIndex.snapshot() else { return nil }
+            var map: [String: String] = [:]
+            for entry in entries {
+                guard let identifier = entry.identifier else { continue }
+                map[entry.path] = identifier
+            }
+            return map.isEmpty ? nil : map
+        }()
 
-        while offset < candidates.count, Date() < deadline {
+        // 这里不再用 deadline 退出循环：到点只是把后面的容器降级成 Caches + tmp，
+        // 不丢容器。真正的硬上限交给调用方的时间预算（后台线程，不卡 UI）。
+        while offset < candidates.count {
             let end = min(offset + batchSize, candidates.count)
             let slice = Array(candidates[offset..<end])
             offset = end
+            let late = Date() >= deadline
+            if late { degradedCount += slice.count }
 
             // 签发必须串行：Caches 交换是全进程唯一的
             var granted: [(path: String, fd: Int32)] = []
@@ -571,6 +713,8 @@ final class CacheCleaner: @unchecked Sendable {
                         buffer[index] = makeOtherTarget(
                             containerFD: item.fd,
                             path: item.path,
+                            identifier: identifierMap?[item.path],
+                            degraded: late,
                             deadline: deadline
                         )
                     }
@@ -583,29 +727,38 @@ final class CacheCleaner: @unchecked Sendable {
         }
 
         log(String(
-            format: "其他 App：%d 个容器，%d 个有缓存，用时 %.1f 秒（逐个签发）",
+            format: "其他 App：%d 个容器，%d 个有缓存，%d 个降级统计，用时 %.1f 秒（逐个签发）",
             candidates.count,
             results.count,
+            degradedCount,
             Date().timeIntervalSince(started)
         ))
         return results
     }
 
-    /// 在一个已经打开的容器上统计 8 个白名单目录。
+    /// 在一个已经打开的容器上统计白名单目录。
     /// 全部用 openat 相对 containerFD，8 个目录各解析一段短路径。
+    /// - Parameter identifier: 从 containermanagerd 索引查到的 bundleID，拿不到时为 nil
+    /// - Parameter degraded: 是否已经过了时间上限；为 true 时只统计 Caches + tmp
     private func makeOtherTarget(
         containerFD: Int32,
         path: String,
+        identifier: String?,
+        degraded: Bool,
         deadline: Date
     ) -> CacheTarget? {
         var picked: [String] = []
         for entry in Self.containerEntries where FileTree.exists(containerFD, entry.rel) {
+            if degraded, !Self.degradedEntries.contains(entry.rel) { continue }
             picked.append(entry.rel)
         }
         guard !picked.isEmpty else { return nil }
 
         let tally = FileTree.Tally()
         var budget = Self.measureBudget
+        // 降级模式是「时间到了但活还没干完」，这里必须把截止时间放开，
+        // 否则 measure 一进去就返回，降级等于不统计。
+        let scanDeadline = degraded ? Date.distantFuture : deadline
         for rel in picked {
             guard let child = FileTree.openSubdirectory(containerFD, rel) else { continue }
             FileTree.measure(
@@ -613,24 +766,24 @@ final class CacheCleaner: @unchecked Sendable {
                 path: path + "/" + rel,
                 prefix: nil,
                 budget: &budget,
-                deadline: deadline,
+                deadline: scanDeadline,
                 tally: tally
             )
             close(child)
         }
         guard tally.bytes > 0 || tally.files > 0 else { return nil }
 
-        // 相对容器 fd 读标识，不再走一遍全路径 getxattr
-        let identifier = FileTree.xattr(containerFD, "com.apple.containermanager.identifier")
-        let identifierText = (identifier?.isEmpty == false) ? identifier : nil
-        let title = identifierText ?? (path as NSString).lastPathComponent
+        // 优先用索引里的 bundleID；索引不可用时退回容器自己的 xattr，最后才是 UUID
+        let xattrIdentifier = FileTree.xattr(containerFD, "com.apple.containermanager.identifier")
+        let resolved = identifier ?? ((xattrIdentifier?.isEmpty == false) ? xattrIdentifier : nil)
+        let title = resolved ?? (path as NSString).lastPathComponent
 
         return CacheTarget(
             id: "other." + path,
             scope: .other,
             title: title,
-            subtitle: identifierText == nil ? (path as NSString).lastPathComponent : nil,
-            detail: "\(picked.count) 项：" + picked.map { shortLabel($0) }.joined(separator: "、"),
+            subtitle: resolved == nil ? (path as NSString).lastPathComponent : nil,
+            detail: "\(picked.count) 项：" + picked.map(shortLabel).joined(separator: "、"),
             paths: picked.map { path + "/" + $0 },
             prefixFilter: nil,
             needsEscape: true,
@@ -926,6 +1079,16 @@ final class Counter: @unchecked Sendable {
         lock.lock()
         count += 1
         lock.unlock()
+    }
+
+    /// 取下一个序号：并发 worker 用它从同一个队列里领任务，
+    /// 比 concurrentPerform 铺开几百个 iteration 少一层调度抖动。
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let current = count
+        count += 1
+        return current
     }
 
     var value: Int {

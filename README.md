@@ -67,14 +67,28 @@
 | 环节 | 做法 |
 | --- | --- |
 | 定位容器 | 先签发容器父目录，一次扩展覆盖所有 App，之后只读 xattr；正常几百毫秒 |
-| 进入其他 App | 父目录 fd 已打开，`openat(父目录, 容器名)` 直接进；不再逐容器签发 |
+| 进入其他 App | 三条路依次降级：父目录 fd 直进 → `container_query` 索引激活 → 逐个签发 |
 | 8 个缓存目录 | 在容器 fd 上 `fstatat` 判断存在，判完直接 `openat` 进去 |
 | 目录内容统计 | `getattrlistbulk` 一次调用取回一批条目的名字、类型、占用；启动时用已知内容的小目录自检布局，校验不过自动退回 `fstatat` |
 | 删除 | `unlinkat(fd, 名字, 0)` 与 `unlinkat(fd, 名字, AT_REMOVEDIR)`，不再拼路径再 `unlink` / `rmdir` |
-| 时间上限 | 整轮扫描 20 秒硬截止，到点不再开新容器，跳过的数量在日志里写明 |
+| 时间上限 | 30 秒软上限；到点后**不丢容器**，只把后面的降级成「Caches + tmp」两项，总时长由后台线程承担 |
 | 扫描缓存 | fsgetpath 结果保留 7 天，失效路径不做预过滤，避免整份缓存被清空后重扫 |
 
-深度扫描的容器数从 200 提到 400，完整统计通常几秒内完成（缓存索引已存在时）。父目录扩展被系统拒绝时退回逐个签发（每个 80–120ms），上限自动降到 120 个，仍控制在 30 秒内。
+**为什么能扫到几百 MB**
+
+关键不是「每个 App 删得更深」，而是**能不能进得去**。一次父目录扩展通常覆盖不全，剩下的大 App 会整片消失，
+表现就是「只清掉几十 MB」。这一版为此加了三条路：
+
+1. 父目录扩展成功时，`openat` 直接进，正常路径零 XPC；
+2. 父目录签不出来，就用 `container_query_set_class(2)` 枚举全部 App 数据容器，再对每个容器调
+   `container_object_sandbox_extension_activate`——一次激活换一个能 `open` 的路径，省掉 Caches 交换的往返。
+   这条和 3105 的主路径一致，只是没有它的内核漏洞，所以完全依赖签名里有没有 container-manager 权限；
+3. 都不行才退回逐个签发（每个 80–120ms）。
+
+扫描日志会把真实数字写出来：`N 个容器，打开 X 个、被拒 Y 个，K 个有缓存，D 个降级统计`。
+如果「打开」远小于「N」，说明卡在权限而不是速度，再多时间也扫不出东西——这时该做的是补签名权限，不是调参数。
+
+深度扫描的容器数从 200 提到 400（慢路径 400），降级机制保证排在后面的容器不会因为超时被丢掉。
 
 ### 3. 诊断
 
@@ -233,6 +247,7 @@ PosterDrop/
     ├── Core/
     │   ├── SandboxEscape.swift    # worse_query：签发 / 交换 / 批量 / 恢复
     │   ├── ContainerLocator.swift # 容器定位（含 fsgetpath 并行扫描）
+    │   ├── ContainerIndex.swift   # 按 bundleID 直取容器（container_query class 2）
     │   ├── FileChannel.swift      # clonefile 写入 + 校验
     │   ├── ArchiveInspector.swift # 解压 / descriptor 发现 / 预览图
     │   ├── ZipArchive.swift       # 自带 zip 解析（EOCD 双路 + ZIP64）
