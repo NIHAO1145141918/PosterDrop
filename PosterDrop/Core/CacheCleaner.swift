@@ -25,6 +25,7 @@
 
 import Foundation
 import Darwin
+import Dispatch
 
 // MARK: - 目标
 
@@ -219,6 +220,8 @@ final class CacheCleaner: @unchecked Sendable {
     private static let maxDepth = 20
     /// 深度扫描最多看多少个容器。
     private static let otherScanLimit = 200
+    /// 父目录扩展签不出来时只能逐个签发（每个约 80–120ms），上限压到 120 才能守住 30 秒。
+    private static let otherScanLimitSlow = 120
     /// 列表里最多展示多少个 App（按占用从大到小）。
     private static let otherDisplayLimit = 60
 
@@ -247,6 +250,12 @@ final class CacheCleaner: @unchecked Sendable {
             if needsEscape, group != nil {
                 SandboxEscape.endBatch()
             }
+        }
+
+        // 先把 PosterBoard 容器根签一次：8 个缓存子目录共用这一个扩展，
+        // 否则每个子目录都要单独走一趟 XPC。
+        if let container, isValidContainer(container), let group {
+            _ = try? SandboxEscape.grant(path: SandboxEscape.canonicalPath(container), group: group)
         }
 
         var measured = targets.map { target in
@@ -355,67 +364,139 @@ final class CacheCleaner: @unchecked Sendable {
     // MARK: 其他 App
 
     /// 每个 App 一项：只把真实存在的白名单目录塞进去，扫完按大小排序。
+    ///
+    /// 拆成两阶段：签发串行（Caches 交换是全局的，本来就并行不了），
+    /// 遍历并行（纯本地 I/O，按核数分摊）。原来两者串在一层循环里，
+    /// 200 个容器要等「签发 + 遍历」各跑 200 遍。
     private func scanOtherApps(
         group: String,
         log: @escaping (String) -> Void
     ) -> [CacheTarget] {
+        let started = Date()
+
+        // 先签父目录：一次扩展覆盖所有 App 容器，后面每个容器的 lstat / xattr
+        // 都走祖先命中，不再逐个走 XPC。签不出来才退回逐个签发。
+        let rootGranted = ContainerLocator.grantApplicationRoot(group: group)
+        if rootGranted {
+            log("容器父目录已授权：本轮统计不再逐个签发扩展")
+        }
+
         let containers = ContainerLocator.discoverContainers(log: log)
         guard !containers.isEmpty else {
             log("没有发现其他 App 的容器，跳过")
             return []
         }
 
-        let posterBoard = ContainerLocator.rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
-        let posterCanonical = posterBoard.map { SandboxEscape.canonicalPath($0) }
+        let posterCanonical = ContainerLocator
+            .rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
+            .map { SandboxEscape.canonicalPath($0) }
 
-        var results: [CacheTarget] = []
-        var scanned = 0
-
-        for container in containers.prefix(Self.otherScanLimit) {
+        // 去重 + 排掉 PosterBoard 自己。父目录没签出来时缩小范围，避免逐个 XPC 拖过 30 秒。
+        let limit = rootGranted ? Self.otherScanLimit : Self.otherScanLimitSlow
+        var seen = Set<String>()
+        var candidates: [String] = []
+        for container in containers.prefix(limit) {
             let canonical = SandboxEscape.canonicalPath(container)
             if let posterCanonical, canonical == posterCanonical { continue }
-
-            scanned += 1
-            if scanned % 25 == 0 {
-                log("其他 App：已扫描 \(scanned) 个容器…")
-            }
-
-            // 容器根签发一次，能覆盖子树时后续判断都便宜；覆盖不了会在 measure 里补签
-            _ = try? SandboxEscape.grant(path: canonical, group: group)
-
-            var paths: [String] = []
-            var labels: [String] = []
-            for entry in Self.containerEntries {
-                let path = canonical + "/" + entry.rel
-                if SandboxEscape.exists(path) {
-                    paths.append(path)
-                    labels.append(shortLabel(entry.rel))
-                }
-            }
-            guard !paths.isEmpty else { continue }
-
-            let identifier = SandboxEscape.containerIdentifier(at: canonical)
-            let identifierText = (identifier?.isEmpty == false) ? identifier : nil
-            let title = identifierText ?? (canonical as NSString).lastPathComponent
-
-            results.append(
-                CacheTarget(
-                    id: "other." + canonical,
-                    scope: .other,
-                    title: title,
-                    subtitle: identifierText == nil ? (canonical as NSString).lastPathComponent : nil,
-                    detail: "\(paths.count) 项：" + labels.joined(separator: "、"),
-                    paths: paths,
-                    prefixFilter: nil,
-                    needsEscape: true,
-                    recommended: false,
-                    caution: nil
-                )
-            )
+            guard seen.insert(canonical).inserted else { continue }
+            candidates.append(canonical)
         }
 
-        log("其他 App：扫描 \(scanned) 个容器，\(results.count) 个有缓存")
+        // 分批处理：内核能同时挂的扩展有上限（192），一次签完 200 个会把前面的挤掉，
+        // 遍历时又得补签，来回抖动比串行还慢。每批 24 个，签完立刻扫完再进下一批。
+        var results: [CacheTarget] = []
+        results.reserveCapacity(candidates.count)
+        let batchSize = 24
+
+        var offset = 0
+        while offset < candidates.count {
+            let end = min(offset + batchSize, candidates.count)
+            let slice = Array(candidates[offset..<end])
+            offset = end
+
+            var collected: [PendingTarget] = []
+            collected.reserveCapacity(slice.count)
+
+            for canonical in slice {
+                guard (try? SandboxEscape.grant(path: canonical, group: group)) != nil else { continue }
+
+                var paths: [String] = []
+                var labels: [String] = []
+                for entry in Self.containerEntries {
+                    let path = canonical + "/" + entry.rel
+                    // 容器根的扩展已经覆盖整棵子树，这里只做 lstat，不再逐目录签发
+                    if SandboxEscape.exists(path) {
+                        paths.append(path)
+                        labels.append(shortLabel(entry.rel))
+                    }
+                }
+                guard !paths.isEmpty else { continue }
+                collected.append(PendingTarget(canonical: canonical, paths: paths, labels: labels))
+            }
+
+            if !collected.isEmpty {
+                let batch = collected
+                var tallies = [Tally](repeating: Tally(), count: batch.count)
+                let writeLock = NSLock()
+
+                tallies.withUnsafeMutableBufferPointer { buffer in
+                    DispatchQueue.concurrentPerform(iterations: batch.count) { index in
+                        var budget = Self.measureBudget
+                        var tally = Tally()
+                        for path in batch[index].paths {
+                            walk(path, group: group, prefix: nil, tally: &tally, depth: 0, budget: &budget)
+                        }
+                        writeLock.lock()
+                        buffer[index] = tally
+                        writeLock.unlock()
+                    }
+                }
+
+                for (index, item) in batch.enumerated() {
+                    let tally = tallies[index]
+                    guard tally.bytes > 0 || tally.files > 0 else { continue }
+
+                    let identifier = SandboxEscape.containerIdentifier(at: item.canonical)
+                    let identifierText = (identifier?.isEmpty == false) ? identifier : nil
+                    let title = identifierText ?? (item.canonical as NSString).lastPathComponent
+
+                    results.append(
+                        CacheTarget(
+                            id: "other." + item.canonical,
+                            scope: .other,
+                            title: title,
+                            subtitle: identifierText == nil ? (item.canonical as NSString).lastPathComponent : nil,
+                            detail: "\(item.paths.count) 项：" + item.labels.joined(separator: "、"),
+                            paths: item.paths,
+                            prefixFilter: nil,
+                            needsEscape: true,
+                            recommended: false,
+                            caution: nil,
+                            bytes: tally.bytes,
+                            files: tally.files,
+                            state: .ready
+                        )
+                    )
+                }
+            }
+
+            log("其他 App：进度 \(end)/\(candidates.count)")
+        }
+
+        log(String(
+            format: "其他 App：%d 个容器，%d 个有缓存，用时 %.1f 秒",
+            candidates.count,
+            results.count,
+            Date().timeIntervalSince(started)
+        ))
         return results
+    }
+
+    /// 阶段的中间态：已经授权、并且确实存在缓存目录的容器。
+    private struct PendingTarget {
+        let canonical: String
+        let paths: [String]
+        let labels: [String]
     }
 
     private func shortLabel(_ rel: String) -> String {

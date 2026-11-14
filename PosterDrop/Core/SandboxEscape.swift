@@ -186,11 +186,50 @@ enum SandboxEscape {
 
     private static var grants: [String: EscapeSession] = [:]
     private static var grantOrder: [String] = []
+    /// 常驻扩展：容器父目录签一次就能覆盖所有 App 的容器，这种不能参与淘汰，
+    /// 否则扫到第 200 个 App 时它已经被挤掉，前面的命中全部失效。
+    private static var pinned: EscapeSession?
     /// 内核允许的扩展数量有限。WQFiles 用 192，这里保持一致。
     private static let maxGrants = 192
 
-    private static func cached(_ key: String) -> EscapeSession? {
+    /// 查找已经签发、且覆盖了 `path` 的祖先目录。
+    ///
+    /// 扩展是递归的：签发一个目录就等于签发它的整棵子树。清理页要对每个 App 的
+    /// 8 个缓存目录逐个签发，如果每次都真的走一趟 XPC，几十个 App 就是上千次往返，
+    /// 这正是扫描慢的主因。命中祖先时直接复用，只做一次 lstat + open 验证。
+    private static func coveringSession(for path: String, needsWrite: Bool) -> EscapeSession? {
+        var best: EscapeSession?
+        var bestLength = 0
+
+        for (key, session) in grants {
+            guard key.count < path.count, path.hasPrefix(key) else { continue }
+            // 必须是路径分隔符，否则 /a/bc 会被 /a/b 误判为子路径
+            guard path[path.index(path.startIndex, offsetBy: key.count)] == "/" else { continue }
+            if needsWrite && !session.writable { continue }
+            if key.count > bestLength {
+                best = session
+                bestLength = key.count
+            }
+        }
+        return best
+    }
+
+    /// 把一个扩展设为常驻：不进 LRU，不会被后续签发挤掉。
+    static func pin(_ session: EscapeSession) {
+        gate.lock()
+        defer { gate.unlock() }
+        if let old = pinned, old.handle != session.handle {
+            release(old.handle)
+        }
+        pinned = session
+        // 同时放进 grants 供 cached / coveringSession 命中，但不进 LRU 队列
+        grants[session.target] = session
+    }
+
+    static func cached(_ key: String) -> EscapeSession? {
         guard let session = grants[key] else { return nil }
+        // 常驻扩展不参与 LRU 调整，否则会被后续签发挤到队首再淘汰
+        if let resident = pinned, resident.target == key { return session }
         grantOrder.removeAll { $0 == key }
         grantOrder.append(key)
         return session
@@ -275,7 +314,12 @@ enum SandboxEscape {
     /// 给一个已经存在的目录/文件申请扩展。
     /// - Parameter requireWrite: 为 true 时，签发后真的在目录里建一个探针文件，建不出来就算失败。
     @discardableResult
-    static func grant(path: String, group: String, requireWrite: Bool = false) throws -> EscapeSession {
+    static func grant(
+        path: String,
+        group: String,
+        requireWrite: Bool = false,
+        pinned: Bool = false
+    ) throws -> EscapeSession {
         let canonical = canonicalPath(path)
 
         gate.lock()
@@ -283,6 +327,15 @@ enum SandboxEscape {
 
         if let hit = cached(canonical), !requireWrite || hit.writable {
             return hit
+        }
+
+        // 祖先已签发就直接用：省掉一次 retarget + queryToken（XPC 往返）。
+        // 用 lstat + open 双重确认，扩展被内核回收时不会误判为可用。
+        if let ancestor = coveringSession(for: canonical, needsWrite: requireWrite) {
+            var probe = stat()
+            if lstat(canonical, &probe) == 0, opens(canonical) {
+                return ancestor
+            }
         }
 
         var status = stat()
@@ -337,7 +390,12 @@ enum SandboxEscape {
                     }
                 }
                 let session = EscapeSession(target: canonical, group: group, handle: handle, writable: writable)
-                remember(session, key: canonical)
+                if pinned {
+                    // 常驻扩展不走 LRU，否则扫到第 192 个容器时它已经被挤掉
+                    Self.pin(session)
+                } else {
+                    remember(session, key: canonical)
+                }
                 noteWorkingFlags(flags == altFlags)
                 return session
             }

@@ -84,6 +84,13 @@ enum ContainerLocator {
             log(stamp("   这个路径不可用，继续自动查找"))
         }
 
+        // ①.5 签发容器父目录：一次扩展覆盖所有 App 容器，之后逐个读 xattr 就能认领。
+        // 成功时整条定位是毫秒级；系统不允许就退回下面几条路，代价只有一次失败尝试。
+        log(stamp("①.5 尝试签发容器父目录…"))
+        if let hit = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) }) {
+            return done(hit)
+        }
+
         log(stamp("② LaunchServices 映射…"))
         let services = launchServicesContainers()
         log(stamp("   返回 \(services.count) 条带 DataContainer 的记录"))
@@ -132,7 +139,7 @@ enum ContainerLocator {
             return done(hit)
         }
 
-        log(stamp("⑥ 尝试直接列举容器父目录…"))
+        // ⑥ 兜底：再试一次父目录（①.5 失败后可能刚好过了一次数据保护解锁）
         if let hit = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) }) {
             return done(hit)
         }
@@ -462,7 +469,10 @@ enum ContainerLocator {
               Date().timeIntervalSince(date) < 7 * 24 * 3600,
               let paths = defaults.array(forKey: ScanCache.paths) as? [String]
         else { return [] }
-        return paths.filter { FileManager.default.fileExists(atPath: $0) }
+        // 这里不能拿 fileExists 过滤：容器路径在沙箱外本来就 stat 不到，
+        // 过滤会把整份缓存清空，下次又得全盘 fsgetpath 扫一遍（几十秒）。
+        // 失效的路径留给调用方判断，反正它们签不出扩展。
+        return paths
     }
 
     private static func cachedScanLimit() -> Int64? {
@@ -565,11 +575,18 @@ enum ContainerLocator {
         return lower == wanted || lower.hasSuffix("." + wanted)
     }
 
-    // MARK: - 父目录（一般列不出来，留作最后尝试）
+    // MARK: - 父目录（一次覆盖所有 App 容器）
+
+    /// 签发容器父目录并常驻：一次扩展覆盖所有 App 容器，之后遍历、读 xattr 都不再逐个签发。
+    /// 这是把「几百次 XPC」压成「一次 XPC」的关键。
+    @discardableResult
+    static func grantApplicationRoot(group: String) -> Bool {
+        (try? SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)) != nil
+    }
 
     private static func scanParentDirectory(group: String, target: String, log: (String) -> Void) -> Hit? {
         do {
-            _ = try SandboxEscape.grant(path: applicationRoot, group: group)
+            _ = try SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)
         } catch {
             log("   父目录扩展签不出来：\(error.localizedDescription)")
             return nil
@@ -578,8 +595,22 @@ enum ContainerLocator {
             log("   父目录不可枚举（系统限制），需要手动填路径")
             return nil
         }
-        log("   枚举到 \(entries.count) 个应用容器，逐个检查…")
-        for name in entries.prefix(500) {
+        log("   枚举到 \(entries.count) 个应用容器，按容器标识匹配…")
+
+        // 快路径：父目录扩展覆盖整棵树，读 xattr 是微秒级，600 个容器也就几毫秒。
+        // 先按标识认领，不命中再退回完整校验（那条会列举目录，慢一个量级）。
+        for name in entries.prefix(600) {
+            let path = applicationRoot + "/" + name
+            guard let identifier = SandboxEscape.containerIdentifier(at: path),
+                  identifier.lowercased() == target.lowercased()
+            else { continue }
+            noteHit(path, bundleID: target)
+            log("   命中 \(identifier)：\(path)")
+            return Hit(path: path, source: "容器列举")
+        }
+
+        log("   没有容器标识匹配，逐个校验…")
+        for name in entries.prefix(200) {
             let path = applicationRoot + "/" + name
             if verify(path: path, group: group, target: target, log: { _ in }) {
                 noteHit(path, bundleID: target)
