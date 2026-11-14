@@ -581,6 +581,23 @@ final class AppModel: ObservableObject {
 
     /// 诊断页自检：只验证能不能拿到扩展、能不能看到 PosterBoard 容器
     func probeDirectChannel() async {
+        // 每一级都重探一次：失败记忆会让后续日志只剩 swap=-6
+        SandboxEscape.resetChannelProbe()
+
+        // 先列一遍容器分类。签不出来时，这份清单能直接回答「systemgroup 里
+        // 有没有 mobilegestaltcache」「签名注入的 group 在不在系统表里」。
+        LogBus.shared.append("— 容器分类枚举 —")
+        for (cls, label) in [(UInt64(13), "systemgroup"), (UInt64(7), "appgroup"), (UInt64(2), "application")] {
+            if let list = ContainerIndex.identifiers(containerClass: cls, limit: 80) {
+                LogBus.shared.append("\(label)（class \(cls)）：\(list.count) 个")
+                if !list.isEmpty {
+                    LogBus.shared.append("  " + list.prefix(15).joined(separator: "，"))
+                }
+            } else {
+                LogBus.shared.append("\(label)（class \(cls)）：被拒绝或符号缺失")
+            }
+        }
+
         let support = Self.osSupport
         guard support.ok else {
             let message = """

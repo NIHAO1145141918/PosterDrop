@@ -131,6 +131,39 @@ enum ContainerIndex {
     /// - Parameter activate: 顺带把每个容器挂到本进程沙箱上（`container_object_sandbox_extension_activate`）。
     ///   挂上之后 open 就不需要再走 Caches 交换那套，代价是每个容器一次内核调用。
     /// - Returns: 成功时返回条目（可能为空数组）；接口不可用、被拒、或只放行了自己时返回 nil。
+    /// 列某一类容器的标识。只用来诊断：确认 systemgroup 里到底有哪些 group、
+    /// 签名注入的 App Group 在不在系统表里。
+    ///
+    /// 和 snapshot 的区别是不传 identifiers、不取路径，纯粹枚举。
+    /// 被拒时返回空数组，符号缺失返回 nil。
+    static func identifiers(containerClass: UInt64, limit: Int = 200) -> [String]? {
+        guard let create = Symbols.queryCreate,
+              let setClass = Symbols.querySetClass,
+              let setFlags = Symbols.querySetFlags,
+              let iterate = Symbols.queryIterate,
+              let free = Symbols.queryFree,
+              let getIdentifier = Symbols.objectIdentifier
+        else { return nil }
+
+        guard let query = create() else { return nil }
+        defer { free(query) }
+
+        setClass(query, containerClass)
+        setFlags(query, queryFlags)
+        Symbols.querySetPart?(query, 0)
+
+        var out: [String] = []
+        let completed = iterate(query) { object in
+            guard let object, let raw = getIdentifier(object) else { return true }
+            let value = String(cString: raw)
+            if !value.isEmpty { out.append(value) }
+            return out.count < limit
+        }
+        // 一条都没拿到且迭代没走完 = 被 daemon 拒绝；空数组 = 这类容器确实是空的
+        if out.isEmpty, !completed { return nil }
+        return out
+    }
+
     static func snapshot(activate: Bool = false, limit: Int = maxEntries) -> [Entry]? {
         guard Symbols.enumerable else {
             record(denial: "缺少 container_query 符号")
