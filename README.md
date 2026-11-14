@@ -229,7 +229,7 @@ PosterDrop/
 
 1. 推送仓库，Actions 会自动跑 `Build IPA`（也支持手动 `workflow_dispatch`）；
 2. 在运行记录的 **Artifacts** 下载 `PosterDrop-ipa`，解压得到 `PosterDrop.ipa`；
-3. 打 tag（如 `v1.3.0`）并推送，IPA 会自动附到 Release。
+3. 打 tag（如 `v1.1.0`）并推送，IPA 会自动附到 Release。
 
 工作流：安装 XcodeGen → `xcodegen generate` → `build-ipa.sh Release` → 上传产物。脚本会去掉 Xcode 的空签名，再用 `Config/PosterDrop.entitlements` 做 ad-hoc 签名，让重签工具能读到 App Groups。
 
