@@ -213,8 +213,8 @@ final class CacheCleaner: @unchecked Sendable {
     /// 系统级白名单。删除前会做「完全相等或在其之下」的校验。
     private static let systemAllowlist: [String] = systemEntries.map(\.path)
 
-    /// 遍历预算：单次扫描最多看这么多条目，防止某个 App 的缓存把主线程卡死。
-    private static let measureBudget = 600_000
+    /// 单个目标的遍历预算：一个 App 的缓存目录再大也看得完，又不至于把扫描拖成分钟级。
+    private static let measureBudget = 50_000
     /// 最长递归深度，挡住异常深的目录树。
     private static let maxDepth = 20
     /// 深度扫描最多看多少个容器。
@@ -249,17 +249,19 @@ final class CacheCleaner: @unchecked Sendable {
             }
         }
 
-        var budget = Self.measureBudget
-        var measured = targets.map { measure($0, group: $0.needsEscape ? group : nil, budget: &budget) }
+        var measured = targets.map { target in
+            var budget = Self.measureBudget
+            return measure(target, group: target.needsEscape ? group : nil, budget: &budget)
+        }
 
         if includeOthers, let group {
-            let others = scanOtherApps(group: group, log: log, budget: &budget)
-            measured.append(contentsOf: others)
+            measured.append(contentsOf: scanOtherApps(group: group, log: log))
         }
 
         // 系统级三项：不需要容器，路径固定
-        measured.append(contentsOf: makeSystemTargets().map {
-            measure($0, group: group, budget: &budget)
+        measured.append(contentsOf: makeSystemTargets().map { target in
+            var budget = Self.measureBudget
+            return measure(target, group: group, budget: &budget)
         })
 
         // 其他 App 按占用从大到小，空的不占位置
@@ -355,8 +357,7 @@ final class CacheCleaner: @unchecked Sendable {
     /// 每个 App 一项：只把真实存在的白名单目录塞进去，扫完按大小排序。
     private func scanOtherApps(
         group: String,
-        log: @escaping (String) -> Void,
-        budget: inout Int
+        log: @escaping (String) -> Void
     ) -> [CacheTarget] {
         let containers = ContainerLocator.discoverContainers(log: log)
         guard !containers.isEmpty else {
