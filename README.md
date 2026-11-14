@@ -69,7 +69,7 @@
 
 | 环节 | 做法 |
 | --- | --- |
-| 定位容器 | 先签发容器父目录，一次扩展覆盖所有 App，之后只读 xattr；正常几百毫秒 |
+| 定位容器 | ⓪ 上次路径（0.02 秒）→ ①.5 `LSApplicationProxy.dataContainerURL` 直取（一次 ObjC 消息）→ ①.6 签发容器父目录 → ②③④ 枚举/查询 → ⑤ `fsgetpath` 扫描 |
 | 进入其他 App | 三条路依次降级：父目录 fd 直进 → `container_query` 索引激活 → 逐个签发 |
 | 8 个缓存目录 | 在容器 fd 上 `fstatat` 判断存在，判完直接 `openat` 进去 |
 | 目录内容统计 | `getattrlistbulk` 一次调用取回一批条目的名字、类型、占用；启动时用已知内容的小目录自检布局，校验不过自动退回 `fstatat` |
@@ -263,6 +263,7 @@ PosterDrop/
     │   ├── SandboxEscape.swift    # worse_query：签发 / 交换 / 批量 / 恢复
     │   ├── ContainerLocator.swift # 容器定位（含 fsgetpath 并行扫描）
     │   ├── ContainerIndex.swift   # 按 bundleID 直取容器（container_query class 2）
+    │   ├── LaunchServices.swift   # LSApplicationProxy 直取容器路径与 App 名称
     │   ├── FileChannel.swift      # clonefile 写入 + 校验
     │   ├── ArchiveInspector.swift # 解压 / descriptor 发现 / 预览图
     │   ├── ZipArchive.swift       # 自带 zip 解析（EOCD 双路 + ZIP64）

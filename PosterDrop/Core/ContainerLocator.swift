@@ -87,9 +87,23 @@ enum ContainerLocator {
             log(stamp("   这个路径不可用，继续自动查找"))
         }
 
-        // ①.5 签发容器父目录：一次扩展覆盖所有 App 容器，之后逐个读 xattr 就能认领。
+        // ①.5 LaunchServices 直取：一次 ObjC 消息换一个路径，不需要签发也不需要枚举。
+        // 系统裁剪 dataContainerURL 时返回 nil，代价只有几微秒；命中时后面几条路全部跳过。
+        log(stamp("①.5 LaunchServices 按 bundleID 直取…"))
+        if let direct = LaunchServices.containerPath(for: bundleID) {
+            log(stamp("   返回容器路径：\(direct)"))
+            if verify(path: direct, group: group, target: bundleID, log: { log(stamp($0)) }) {
+                noteHit(direct, bundleID: bundleID)
+                return done(Hit(path: SandboxEscape.canonicalPath(direct), source: "LaunchServices 直取"))
+            }
+            log(stamp("   路径拿到了但进不去，继续按原顺序查找"))
+        } else {
+            log(stamp("   dataContainerURL 为空（被系统裁剪），继续查找"))
+        }
+
+        // ①.6 签发容器父目录：一次扩展覆盖所有 App 容器，之后逐个读 xattr 就能认领。
         // 成功时整条定位是毫秒级；系统不允许就退回下面几条路，代价只有一次失败尝试。
-        log(stamp("①.5 尝试签发容器父目录…"))
+        log(stamp("①.6 尝试签发容器父目录…"))
         if let hit = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) }) {
             return done(hit)
         }
@@ -142,7 +156,7 @@ enum ContainerLocator {
             return done(hit)
         }
 
-        // ⑥ 兜底：再试一次父目录（①.5 失败后可能刚好过了一次数据保护解锁）
+        // ⑥ 兜底：再试一次父目录（①.6 失败后可能刚好过了一次数据保护解锁）
         if let hit = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) }) {
             return done(hit)
         }
@@ -685,6 +699,14 @@ enum ContainerLocator {
         return send(target, selector, argument)?.takeUnretainedValue()
     }
 
+    /// 类方法版本的 sendObject：`class_getClassMethod` 找不到就返回 nil。
+    private static func sendClassObject(_ cls: AnyClass, _ name: String, _ argument: AnyObject) -> AnyObject? {
+        let selector = NSSelectorFromString(name)
+        guard let method = class_getClassMethod(cls, selector) else { return nil }
+        let send = unsafeBitCast(method_getImplementation(method), to: MsgSendObject.self)
+        return send(cls as AnyObject, selector, argument)?.takeUnretainedValue()
+    }
+
     private static func launchServicesContainers() -> [Entry] {
         guard let workspaceClass = NSClassFromString("LSApplicationWorkspace"),
               let workspace = sendClass(workspaceClass, "defaultWorkspace") else { return [] }
@@ -712,9 +734,13 @@ enum ContainerLocator {
             }
         }
 
-        for selector in ["applicationProxyForIdentifier:", "applicationProxyForBundleIdentifier:"] {
-            if let proxy = sendObject(workspace, selector, posterBoardBundleID as NSString) {
-                append(proxy)
+        // 这两个选择器属于 LSApplicationProxy 的类方法。发给 workspace 会安静返回 nil，
+        // 结果只剩下 allApplications 全表兜底，等于白跑一遍。
+        if let proxyClass = NSClassFromString("LSApplicationProxy") {
+            for selector in ["applicationProxyForIdentifier:", "applicationProxyForBundleIdentifier:"] {
+                if let proxy = sendClassObject(proxyClass, selector, posterBoardBundleID as NSString) {
+                    append(proxy)
+                }
             }
         }
         return results
