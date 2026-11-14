@@ -221,8 +221,13 @@ PosterBoard 把每张壁纸存成一组描述符目录：
 
 ## 五、常见问题
 
-**Q：为什么不需要 VPN 和配对文件？**
-A：底层是 worse_query，靠 App Group 容器 `Library/Caches` 的符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成。旧版的 Airlift 隧道（需要配对 + LocalDevVPN）已经整条删除。
+**Q：为什么不需要 VPN？**
+A：核心通道是 worse_query，靠 App Group 容器 `Library/Caches` 的符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成，不开 VPN 也能量。
+
+**Q：诊断页里的「配对文件」是干什么的？**
+A：可选。导入一份和本机配过对的 pairing 记录后，App 可以走 RSD 调 installation_proxy，**一次拿到全部 App 的容器路径（1–2 秒）**，跳过整卷 inode 扫描（约 250 秒）。不导入也能用，只是清理时第一次要走扫描。
+
+它和 VPN 的关系：VPN 只负责「让 App 连得上本机 RSD 端口」，不产生任何速度；快的是 installation_proxy 这条查询通道。如果配对握手能直接连局域网地址，连 VPN 都不需要。
 
 **Q：iOS 26 之前能用吗？支持 19–25 吗？**
 A：不能。iOS 18 之后 Apple 直接跳到 iOS 26，没有 19–25 这些版本号；而这条签发缺陷只存在于 26.0 及以后。

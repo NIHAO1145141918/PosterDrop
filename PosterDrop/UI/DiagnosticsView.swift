@@ -16,6 +16,8 @@ struct DiagnosticsView: View {
     @State private var copiedHint: String?
     @State private var vpnReport: VPNReport?
     @State private var vpnChecking = false
+    @State private var showingPairing = false
+    @State private var remoteReport: RemoteProbeReport?
 
     var body: some View {
         NavigationStack {
@@ -33,6 +35,7 @@ struct DiagnosticsView: View {
                         containerCard
                         directCard
                         optionsCard
+                        remoteCard
                         actionsCard
                         logCard
                         aboutCard
@@ -45,6 +48,10 @@ struct DiagnosticsView: View {
             }
             .navigationTitle("诊断")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $showingPairing) {
+                PairingSheet()
+            }
+            .onAppear { remoteReport = RemoteContainerIndex.shared.latestReport }
             .overlay(alignment: .top) {
                 if let hint = copiedHint {
                     Text(hint)
@@ -245,6 +252,59 @@ struct DiagnosticsView: View {
                             .fill(Color.primary.opacity(0.05))
                     )
             }
+        }
+        .card()
+    }
+
+    // MARK: - 远程索引
+
+    /// 配对 + RSD 是可选的快路径：通了就把 250 秒的 inode 扫描换成 1 秒的
+    /// installation_proxy，不通也不影响现有任何功能，所以这里不报红字。
+    private var remoteCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("远程索引（可选）")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(PairingStore.shared.hasPairing ? "已导入" : "未启用")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(PairingStore.shared.hasPairing ? .green : .secondary)
+            }
+
+            Text(PairingStore.shared.hasPairing
+                 ? "通过配对文件走 RSD，一次拿到全部 App 的容器路径，跳过整卷扫描。"
+                 : "导入一份和本机配过对的 pairing 记录，清理时就不用再扫 1.2 亿个 inode。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let report = remoteReport {
+                HStack(spacing: 12) {
+                    Text(report.state.rawValue)
+                        .font(.caption.weight(.medium))
+                    if report.isUsable {
+                        Text("\(report.appCount) App / \(report.containerCount) 容器")
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Text(String(format: "%.2fs", report.elapsed))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Button {
+                showingPairing = true
+            } label: {
+                Label(PairingStore.shared.hasPairing ? "管理配对文件" : "导入配对文件",
+                      systemImage: "key.horizontal")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+            }
+            .buttonStyle(.bordered)
+            .tint(Theme.accent)
         }
         .card()
     }
