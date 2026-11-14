@@ -19,7 +19,7 @@ enum LaunchServices {
 
     // MARK: - 对外查询
 
-    /// 按 bundleID 取数据容器路径。拿不到返回 nil。
+    /// 按 bundleID 取数据容器路径。拿不到或拿到的不是容器返回 nil。
     static func containerPath(for bundleID: String) -> String? {
         guard let proxy = proxy(for: bundleID) else { return nil }
         return containerPath(of: proxy)
@@ -88,10 +88,28 @@ enum LaunchServices {
 
     private static func containerPath(of proxy: AnyObject) -> String? {
         for selector in ["dataContainerURL", "containerURL"] {
-            if let url = call(proxy, selector) as? URL, !url.path.isEmpty { return url.path }
-            if let text = call(proxy, selector) as? String, !text.isEmpty { return text }
+            if let url = call(proxy, selector) as? URL, isContainerPath(url.path) { return url.path }
+            if let text = call(proxy, selector) as? String, isContainerPath(text) { return text }
         }
         return nil
+    }
+
+    /// 只接受真正指向 App 数据容器的路径。
+    ///
+    /// iOS 27.3 实测：`dataContainerURL` 对系统 App 会返回 `/var/mobile`——
+    /// 一个父目录，不是容器。拿它去签发只会换来一次 -6，白等一次失败。
+    /// 形状校验挡在前面，比事后判断错误码便宜。
+    private static func isContainerPath(_ raw: String) -> Bool {
+        var path = raw
+        if path.hasPrefix("/private/") { path.removeFirst("/private".count) }
+        let prefix = "/var/mobile/Containers/Data/"
+        guard path.hasPrefix(prefix) else { return false }
+
+        let parts = path.dropFirst(prefix.count).split(separator: "/")
+        guard parts.count >= 2 else { return false }
+        let kinds: Set<String> = ["Application", "PluginKitPlugin", "InternalDaemon"]
+        guard kinds.contains(String(parts[0])) else { return false }
+        return UUID(uuidString: String(parts[1])) != nil
     }
 
     // MARK: - ObjC 消息

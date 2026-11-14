@@ -87,25 +87,40 @@ enum ContainerLocator {
             log(stamp("   这个路径不可用，继续自动查找"))
         }
 
+        // 签发通道被内核拒绝时记下错误码。-6 表示 worse_query 已被系统修补，
+        // 后面所有路径都依赖同一条通道，继续跑只会让人等——尤其是 ⑤ 的全盘扫描。
+        var kernelCode: Int64?
+
         // ①.5 LaunchServices 直取：一次 ObjC 消息换一个路径，不需要签发也不需要枚举。
         // 系统裁剪 dataContainerURL 时返回 nil，代价只有几微秒；命中时后面几条路全部跳过。
         log(stamp("①.5 LaunchServices 按 bundleID 直取…"))
         if let direct = LaunchServices.containerPath(for: bundleID) {
             log(stamp("   返回容器路径：\(direct)"))
-            if verify(path: direct, group: group, target: bundleID, log: { log(stamp($0)) }) {
+            let check = verifyDetailed(path: direct, group: group, target: bundleID, log: { log(stamp($0)) })
+            if check.ok {
                 noteHit(direct, bundleID: bundleID)
                 return done(Hit(path: SandboxEscape.canonicalPath(direct), source: "LaunchServices 直取"))
             }
+            if let code = check.code { kernelCode = code }
             log(stamp("   路径拿到了但进不去，继续按原顺序查找"))
         } else {
-            log(stamp("   dataContainerURL 为空（被系统裁剪），继续查找"))
+            log(stamp("   没有返回容器路径（为空，或返回的不是容器目录），继续查找"))
         }
 
         // ①.6 签发容器父目录：一次扩展覆盖所有 App 容器，之后逐个读 xattr 就能认领。
         // 成功时整条定位是毫秒级；系统不允许就退回下面几条路，代价只有一次失败尝试。
         log(stamp("①.6 尝试签发容器父目录…"))
-        if let hit = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) }) {
+        let parent = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) })
+        if let hit = parent.hit {
             return done(hit)
+        }
+        if let code = parent.code { kernelCode = code }
+
+        if let code = kernelCode, isFatalGrantCode(code) {
+            log(stamp("❌ 签发通道被拒绝（代码 \(code)），判定为系统已修补，中止后续查找"))
+            log("   ②③④⑤ 走的都是同一条扩展通道，跑下去不会成功，只会多等几分钟（全盘扫描尤其）。")
+            log("   已实测：26.0 – 27.2 可用；27.3 起 containermanagerd 不再签发跨容器扩展。")
+            return nil
         }
 
         log(stamp("② LaunchServices 映射…"))
@@ -157,7 +172,7 @@ enum ContainerLocator {
         }
 
         // ⑥ 兜底：再试一次父目录（①.6 失败后可能刚好过了一次数据保护解锁）
-        if let hit = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) }) {
+        if let hit = scanParentDirectory(group: group, target: bundleID, log: { log(stamp($0)) }).hit {
             return done(hit)
         }
 
@@ -170,25 +185,42 @@ enum ContainerLocator {
     // MARK: - 验证
 
     static func verify(path: String, group: String, target: String? = nil, log: (String) -> Void) -> Bool {
+        verifyDetailed(path: path, group: group, target: target, log: log).ok
+    }
+
+    /// 同 `verify`，但把签发失败的错误码带出来。
+    ///
+    /// -6（内核拒绝签发）是判定「系统已修补 worse_query」的唯一可靠信号：
+    /// 拿到它之后，后面的父目录签发、容器枚举、fsgetpath 扫描都走同一条扩展通道，
+    /// 继续跑只会更慢，不可能成功。这个码必须能传出去，否则调用方只会看到「失败」。
+    static func verifyDetailed(
+        path: String,
+        group: String,
+        target: String? = nil,
+        log: (String) -> Void
+    ) -> (ok: Bool, code: Int64?) {
         let target = target ?? posterBoardBundleID
         let canonical = SandboxEscape.canonicalPath(path)
         do {
             _ = try SandboxEscape.grant(path: canonical, group: group)
+        } catch let failure as SandboxEscape.Failure {
+            log("   ⚠️ 申请扩展失败：\(failure.message)（代码 \(failure.code)）")
+            return (false, failure.code)
         } catch {
             log("   ⚠️ 申请扩展失败：\(error.localizedDescription)")
-            return false
+            return (false, nil)
         }
 
         if target == posterBoardBundleID, SandboxEscape.exists(canonical + "/" + storeRelativePath) {
             log("   ✅ 找到 \(storeRelativePath)")
-            return true
+            return (true, nil)
         }
 
         // 有些系统版本把 store 放在别处；只要 xattr 认得这个容器就接受
         if let identifier = SandboxEscape.containerIdentifier(at: canonical),
            identifier.lowercased() == target.lowercased() {
             log("   ✅ 容器标识为 \(identifier)（数据目录稍后自动创建）")
-            return true
+            return (true, nil)
         }
 
         if let items = try? FileManager.default.contentsOfDirectory(atPath: canonical + "/Library"), !items.isEmpty {
@@ -196,7 +228,7 @@ enum ContainerLocator {
         } else {
             log("   ⚠️ 容器不可读（数据保护未解锁，或不是目标容器）")
         }
-        return false
+        return (false, nil)
     }
 
     // MARK: - 批量识别
@@ -611,15 +643,19 @@ enum ContainerLocator {
     static func grantApplicationRootDetailed(
         group: String,
         requireWrite: Bool = false
-    ) -> (ok: Bool, detail: String) {
+    ) -> (ok: Bool, code: Int64?, detail: String) {
         var reasons: [String] = []
+        var lastCode: Int64?
 
         if requireWrite {
             do {
                 _ = try SandboxEscape.grant(
                     path: applicationRoot, group: group, requireWrite: true, pinned: true
                 )
-                return (true, "可写")
+                return (true, nil, "可写")
+            } catch let failure as SandboxEscape.Failure {
+                lastCode = failure.code
+                reasons.append("可写：\(failure.localizedDescription)")
             } catch {
                 reasons.append("可写：\(error.localizedDescription)")
             }
@@ -627,24 +663,34 @@ enum ContainerLocator {
 
         do {
             _ = try SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)
-            return (true, requireWrite ? "只读（写探针失败：\(reasons.joined(separator: "；"))）" : "只读")
+            return (true, nil, requireWrite ? "只读（写探针失败：\(reasons.joined(separator: "；"))）" : "只读")
+        } catch let failure as SandboxEscape.Failure {
+            lastCode = failure.code
+            reasons.append("只读：\(failure.localizedDescription)")
         } catch {
             reasons.append("只读：\(error.localizedDescription)")
         }
 
-        return (false, reasons.joined(separator: "；"))
+        return (false, lastCode, reasons.joined(separator: "；"))
     }
 
-    private static func scanParentDirectory(group: String, target: String, log: (String) -> Void) -> Hit? {
+    private static func scanParentDirectory(
+        group: String,
+        target: String,
+        log: (String) -> Void
+    ) -> (hit: Hit?, code: Int64?) {
         do {
             _ = try SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)
+        } catch let failure as SandboxEscape.Failure {
+            log("   父目录扩展签不出来：\(failure.message)（代码 \(failure.code)）")
+            return (nil, failure.code)
         } catch {
             log("   父目录扩展签不出来：\(error.localizedDescription)")
-            return nil
+            return (nil, nil)
         }
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: applicationRoot) else {
             log("   父目录不可枚举（系统限制），需要手动填路径")
-            return nil
+            return (nil, nil)
         }
         log("   枚举到 \(entries.count) 个应用容器，按容器标识匹配…")
 
@@ -657,7 +703,7 @@ enum ContainerLocator {
             else { continue }
             noteHit(path, bundleID: target)
             log("   命中 \(identifier)：\(path)")
-            return Hit(path: path, source: "容器列举")
+            return (Hit(path: path, source: "容器列举"), nil)
         }
 
         log("   没有容器标识匹配，逐个校验…")
@@ -665,10 +711,16 @@ enum ContainerLocator {
             let path = applicationRoot + "/" + name
             if verify(path: path, group: group, target: target, log: { _ in }) {
                 noteHit(path, bundleID: target)
-                return Hit(path: path, source: "容器列举")
+                return (Hit(path: path, source: "容器列举"), nil)
             }
         }
-        return nil
+        return (nil, nil)
+    }
+
+    /// 这两个码意味着签发通道本身被拒（-6 内核拒绝，-8 签了也打不开）。
+    /// 在它们之后继续枚举和扫描没有意义——全盘扫几分钟也换不来一个能打开的容器。
+    private static func isFatalGrantCode(_ code: Int64) -> Bool {
+        code == -6 || code == -8
     }
 
     // MARK: - LaunchServices

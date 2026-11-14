@@ -585,7 +585,7 @@ final class AppModel: ObservableObject {
         guard support.ok else {
             let message = """
             ❌ 当前系统 iOS \(support.text) 不在支持范围。
-            本项目只支持 iOS 26.0 – 27.2：Apple 从 iOS 18 直接跳到 iOS 26，不存在 iOS 19–25；低于 26.0 的系统没有这条签发缺陷。
+            本项目只支持 iOS 26.0 – 27.2：低于 26.0 没有这条签发缺陷；27.3 起 containermanagerd 不再签发跨容器扩展，实测返回 -6，功能和缓存清理都不可用。
             """
             directStatus = message
             LogBus.shared.append("— 直连通道自检 —")

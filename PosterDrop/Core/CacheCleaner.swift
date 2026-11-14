@@ -425,6 +425,14 @@ final class CacheCleaner: @unchecked Sendable {
             ? "容器父目录已授权（\(root.detail)）：整轮不再逐个签发扩展"
             : "容器父目录授权失败（\(root.detail)）：改走索引激活 / 逐个签发")
 
+        // 失败原因是内核拒绝签发（-6）时，整条通道在这个系统上已经关了。
+        // 后面逐个签发每个 80–120ms，400 个就是 40 秒全失败，不如当场说清楚。
+        if !rootGranted, let code = root.code, code == -6 || code == -8 {
+            log("其他 App：签发通道被拒绝（代码 \(code)），跳过深度扫描")
+            log("   iOS 27.3 起 containermanagerd 不再签发跨容器扩展，只能清理本 App 与 PosterBoard。")
+            return []
+        }
+
         let posterCanonical = ContainerLocator
             .rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
             .map { SandboxEscape.canonicalPath($0) }
