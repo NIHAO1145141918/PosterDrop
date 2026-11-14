@@ -44,10 +44,11 @@
 
 **安全护栏**（这部分比功能本身重要）：
 
-1. **路径不可伪造** —— 只由「合法容器根 + 固定相对路径」拼出，界面上没有任何入口能传入任意路径；
+1. **路径不可伪造** —— 容器内只由「合法容器根 + 固定相对路径」拼出；系统级是三个硬编码绝对路径，删除前还要过一遍精确白名单校验；界面上没有任何入口能传入任意路径；
 2. **符号链接只删链接本身** —— `lstat` 判定是链接就走 `unlink`，绝不跟进。App Group 的 `Library/Caches` 本身就是链接，跟进去会删到别的容器；
 3. **逐层签发** —— 扩展只覆盖签发的那一个目录，所以每层删除前先给父目录签发写权限，子目录清空后才 `rmdir`；
-4. **不碰壁纸本体** —— 壁纸在 `Library/Application Support/PRBPosterExtensionDataStore`，不在任何清理路径里。
+4. **不碰壁纸本体** —— 壁纸在 `Library/Application Support/PRBPosterExtensionDataStore`，不在任何清理路径里；
+5. **不碰偏好设置** —— `Library/Preferences`、`Documents`、`Application Support` 都不在白名单里，清缓存不会丢登录以外的数据。
 
 ### 3. 诊断
 

@@ -418,7 +418,7 @@ final class AppModel: ObservableObject {
         isScanningCache = true
         defer { isScanningCache = false }
         cacheProgress = 0
-        cacheScanNote = includeOthers ? "正在统计所有 App 的缓存…" : "正在统计缓存大小…"
+        cacheScanNote = includeOthers ? "正在逐个统计 App 的缓存，第一次要签发几百次扩展…" : "正在统计缓存大小…"
 
         // 这里不主动定位容器：清理页应该秒开。没有路径时只统计本 App 的部分，
         // 页面上会提示先去「诊断」探测一次。
@@ -426,7 +426,7 @@ final class AppModel: ObservableObject {
         let group = resolvedAppGroup
         let target = container
         let previousSelection = Set(cacheTargets.filter { $0.isSelected }.map { $0.id })
-        let previousOther = cacheTargets.first { $0.scope == .other }
+        let previousOthers = cacheTargets.filter { $0.scope == .other }
 
         LogBus.shared.append("— 统计缓存 —")
         let started = Date()
@@ -440,9 +440,10 @@ final class AppModel: ObservableObject {
             )
         }.value
 
-        // 这次没做深度扫描时，把上次那一项保留下来，别让它凭空消失
-        if !includeOthers, let previousOther {
-            scanned.append(previousOther)
+        // 这次没做深度扫描时，把上次那批保留下来，别让它们凭空消失
+        if !includeOthers, !previousOthers.isEmpty {
+            let insertAt = scanned.firstIndex { $0.scope == .system } ?? scanned.count
+            scanned.insert(contentsOf: previousOthers, at: insertAt)
         }
 
         // 重扫后保住用户之前的勾选
@@ -519,7 +520,9 @@ final class AppModel: ObservableObject {
         cacheProgress = 0
         isCleaningCache = false
         cacheLastReport = report
-        cacheNeedsRespring = picked.contains { $0.scope == .posterBoard && report.cleanedIDs.contains($0.id) }
+        cacheNeedsRespring = picked.contains {
+            ($0.scope == .posterBoard || $0.scope == .system) && report.cleanedIDs.contains($0.id)
+        }
 
         LogBus.shared.append("✅ \(report.text)，用时 \(String(format: "%.1f", report.elapsed)) 秒")
         for failure in report.failures.prefix(6) {

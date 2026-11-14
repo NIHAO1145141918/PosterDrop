@@ -15,6 +15,7 @@ struct CleanerView: View {
     @EnvironmentObject private var model: AppModel
 
     @State private var expanded = false
+    @State private var showAllOthers = false
 
     var body: some View {
         NavigationStack {
@@ -53,6 +54,8 @@ struct CleanerView: View {
                             } else {
                                 deepScanCard
                             }
+
+                            systemSection
                         }
 
                         safetyCard
@@ -220,7 +223,16 @@ struct CleanerView: View {
                 text: "这次没有扫到其他 App 的缓存。可以下拉刷新再试，或先在「诊断」页让容器扫描跑一次。"
             )
         } else {
-            groupCard(title: "其他 App", icon: "square.grid.2x2", targets: targets)
+            groupCard(title: "其他 App", icon: "square.grid.2x2", targets: targets, collapsed: true)
+        }
+    }
+
+    @ViewBuilder
+    private var systemSection: some View {
+        let targets = model.cacheTargets.filter { $0.scope == .system }
+
+        if !targets.isEmpty {
+            groupCard(title: "系统（跨 App）", icon: "internaldrive", targets: targets)
         }
     }
 
@@ -253,7 +265,7 @@ struct CleanerView: View {
                 Spacer()
             }
 
-            Text("把设备上能看到的 App 容器的 Library/Caches 与 tmp 汇总成一项。第一次扫描要反查容器 inode，需要几秒。")
+            Text("逐个 App 统计缓存、临时文件、快照、Cookie 与网页数据，按占用从大到小排。第一次扫描要反查容器并逐个签发扩展，需要十几秒。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -273,7 +285,12 @@ struct CleanerView: View {
         .card()
     }
 
-    private func groupCard(title: String, icon: String, targets: [CacheTarget]) -> some View {
+    private func groupCard(
+        title: String,
+        icon: String,
+        targets: [CacheTarget],
+        collapsed: Bool = false
+    ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
@@ -305,11 +322,33 @@ struct CleanerView: View {
                     .foregroundColor(.secondary)
                     .padding(.vertical, 8)
             } else {
-                ForEach(targets) { target in
-                    if target.id != targets.first?.id {
+                let limit = 6
+                let visible = (collapsed && !showAllOthers) ? Array(targets.prefix(limit)) : targets
+
+                ForEach(visible) { target in
+                    if target.id != visible.first?.id {
                         Divider().opacity(0.35)
                     }
                     row(target)
+                }
+
+                if collapsed && targets.count > limit {
+                    Divider().opacity(0.35)
+                    Button {
+                        withAnimation(.snappy) { showAllOthers.toggle() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(showAllOthers ? "收起" : "展开其余 \(targets.count - limit) 个 App")
+                                .font(.caption2.weight(.semibold))
+                            Image(systemName: showAllOthers ? "chevron.up" : "chevron.down")
+                                .font(.caption2)
+                        }
+                        .foregroundColor(Theme.accent)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -341,6 +380,16 @@ struct CleanerView: View {
                     Text(target.title)
                         .font(.subheadline.weight(.medium))
                         .foregroundColor(target.isCleanable ? .primary : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if let subtitle = target.subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.8))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
 
                     Text(target.detail)
                         .font(.caption2)
@@ -399,7 +448,17 @@ struct CleanerView: View {
         case "pb.tmp": return "clock.arrow.circlepath"
         case "pb.Library/SplashBoard": return "rectangle.on.rectangle"
         case "pb.Library/Saved Application State": return "macwindow"
-        default: return "square.grid.2x2"
+        case "pb.Library/HTTPStorages": return "network"
+        case "pb.Library/Cookies": return "person.badge.key"
+        case "pb.Library/WebKit": return "globe"
+        case "pb.Library/Logs": return "doc.text.magnifyingglass"
+        default:
+            if target.id.hasPrefix("sys.") {
+                if target.id.contains("CrashReporter") { return "exclamationmark.triangle" }
+                if target.id.contains("SplashBoard") { return "rectangle.stack.badge.minus" }
+                return "internaldrive"
+            }
+            return "app.dashed"
         }
     }
 
@@ -408,6 +467,7 @@ struct CleanerView: View {
         case .app: return Theme.accent
         case .posterBoard: return Color(red: 0.85, green: 0.36, blue: 0.62)
         case .other: return Color(red: 0.95, green: 0.55, blue: 0.25)
+        case .system: return Color(red: 0.55, green: 0.42, blue: 0.92)
         }
     }
 
@@ -463,10 +523,10 @@ struct CleanerView: View {
                     .font(.subheadline.weight(.semibold))
             }
 
-            safetyLine("只动 Library/Caches、tmp 与应用快照；壁纸本体在 Application Support，不会被删。")
+            safetyLine("只动白名单里的 8 个位置：缓存、tmp、快照、窗口状态、网络缓存、Cookie、网页数据、日志；壁纸本体在 Application Support，不会被删。")
             safetyLine("遇到符号链接只删链接本身，不会顺着链接清到别的容器。")
             safetyLine("清理过程中会给每一层目录单独签发写权限，失败的项目会列在日志里，不会“删一半就停”。")
-            safetyLine("其他 App 的缓存清掉后，部分 App 需要重新登录或重新下载离线内容。")
+            safetyLine("Cookie、网络缓存、网页数据被标为「需重新登录」，默认不勾；系统那组要清桌面快照和共享缓存，同样默认不勾。")
 
             Button {
                 expanded.toggle()
@@ -483,7 +543,7 @@ struct CleanerView: View {
             .padding(.top, 2)
 
             if expanded {
-                Text("清理走的是与注入同一条 worse_query 通道：先把 App Group 的 Library/Caches 换成指向目标目录的符号链接，让 containermanagerd 签发沙箱扩展，再逐层删除。所有目标路径都由「合法容器根 + 固定相对路径」拼出来，界面上没有任何方式传入任意路径，所以不可能清到 Documents、Preferences 或系统目录。")
+                Text("清理走的是与注入同一条 worse_query 通道：先把 App Group 的 Library/Caches 换成指向目标目录的符号链接，让 containermanagerd 签发沙箱扩展，再逐层删除。所有目标路径都由「合法容器根 + 固定相对路径」拼出来，界面上没有任何方式传入任意路径，所以不可能清到 Documents 或 Preferences。系统那三项目标是硬编码的绝对路径，删除前还会做一次精确白名单校验，多一层都不会碰。")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -12,6 +12,11 @@
 //    3. 删除前先给「父目录」签发写扩展，子目录清空后才 rmdir，链接一律 unlink。
 //       扩展只覆盖签发的那一个目录，这一条不能省。
 //
+//  覆盖范围（按「删了会怎样」分层）：
+//    · 可重建：Caches / tmp / SplashBoard / Saved Application State / Logs
+//    · 需重登：Cookies / WebKit / HTTPStorages
+//    · 系统级：全系统应用快照 / 崩溃日志 / 共享缓存（默认不勾）
+//
 //  性能：
 //    - 整轮清理包在 beginBatch / endBatch 里，Caches 符号链接只装一次；
 //    - 遍历用 opendir + lstat，不构造 URL，十万级文件也能在秒级走完；
@@ -30,8 +35,10 @@ struct CacheTarget: Identifiable, Equatable, Sendable {
         case app
         /// PosterBoard 容器的缓存
         case posterBoard
-        /// 其他 App 的 Library/Caches（深度扫描才出现）
+        /// 其他 App 的缓存，逐个 App 一项
         case other
+        /// 系统级共享缓存，跨 App 生效
+        case system
     }
 
     enum State: Equatable, Sendable {
@@ -45,8 +52,10 @@ struct CacheTarget: Identifiable, Equatable, Sendable {
     let id: String
     let scope: Scope
     let title: String
+    /// 副标题：bundle id 或路径说明，放在标题下方一行小字
+    let subtitle: String?
     let detail: String
-    /// 要遍历的根目录（「其他 App」是多个容器拼起来的）
+    /// 要遍历的根目录（一个 App 可能是多个白名单目录）
     let paths: [String]
     /// 只清理顶层名字带这个前缀的条目（本 App 的 tmp 里只动自己的 stage 目录）
     let prefixFilter: String?
@@ -112,11 +121,12 @@ final class CacheCleaner: @unchecked Sendable {
         let caution: String?
     }
 
+    /// 容器内可清理的位置。分三档：可重建、需重新登录、日志类。
     private static let containerEntries: [Entry] = [
         Entry(
             rel: "Library/Caches",
-            title: "壁纸缓存",
-            detail: "渲染壁纸时生成的缩略图和预览图，删掉后系统会自己重建",
+            title: "缓存与缩略图",
+            detail: "渲染时生成的缩略图、预览图和下载缓存，删掉后系统会自己重建",
             recommended: true,
             caution: nil
         ),
@@ -140,15 +150,77 @@ final class CacheCleaner: @unchecked Sendable {
             detail: "上次退出时的界面状态，只影响「回到上一次的位置」",
             recommended: false,
             caution: "清掉后重新打开可能回到首页"
+        ),
+        Entry(
+            rel: "Library/HTTPStorages",
+            title: "网络缓存",
+            detail: "HTTP 缓存与 Cookie 数据库，图片和接口响应会重新下载",
+            recommended: false,
+            caution: "清掉后需要重新登录"
+        ),
+        Entry(
+            rel: "Library/Cookies",
+            title: "Cookies",
+            detail: "网站与账号的登录会话",
+            recommended: false,
+            caution: "清掉后所有网页登录都会退出"
+        ),
+        Entry(
+            rel: "Library/WebKit",
+            title: "网页数据",
+            detail: "内置浏览器留下的页面缓存、LocalStorage 与 IndexedDB",
+            recommended: false,
+            caution: "清掉后网页需要重新加载"
+        ),
+        Entry(
+            rel: "Library/Logs",
+            title: "运行日志",
+            detail: "诊断日志与崩溃转储，删掉不影响功能",
+            recommended: false,
+            caution: nil
         )
     ]
 
+    /// 系统级路径：跨 App 生效，默认不勾，必须精确命中白名单才允许删。
+    private struct SystemEntry {
+        let path: String
+        let title: String
+        let detail: String
+        let caution: String?
+    }
+
+    private static let systemEntries: [SystemEntry] = [
+        SystemEntry(
+            path: "/private/var/mobile/Library/SplashBoard/Snapshots",
+            title: "全系统应用快照",
+            detail: "所有 App 的后台界面截图，通常是这类清理里最大的一块",
+            caution: "所有 App 的后台预览都会重拍，切换动画会短暂变慢"
+        ),
+        SystemEntry(
+            path: "/private/var/mobile/Library/Logs/CrashReporter",
+            title: "崩溃日志",
+            detail: "系统与各 App 的崩溃报告，删掉不影响功能",
+            caution: nil
+        ),
+        SystemEntry(
+            path: "/private/var/mobile/Library/Caches",
+            title: "系统共享缓存",
+            detail: "SpringBoard 图标缓存、系统服务缓存，删掉后桌面会重建一次",
+            caution: "桌面图标与壁纸可能短暂重载，建议清理后 respring"
+        )
+    ]
+
+    /// 系统级白名单。删除前会做「完全相等或在其之下」的校验。
+    private static let systemAllowlist: [String] = systemEntries.map(\.path)
+
     /// 遍历预算：单次扫描最多看这么多条目，防止某个 App 的缓存把主线程卡死。
-    private static let measureBudget = 400_000
+    private static let measureBudget = 600_000
     /// 最长递归深度，挡住异常深的目录树。
-    private static let maxDepth = 16
+    private static let maxDepth = 20
     /// 深度扫描最多看多少个容器。
-    private static let otherAppLimit = 120
+    private static let otherScanLimit = 200
+    /// 列表里最多展示多少个 App（按占用从大到小）。
+    private static let otherDisplayLimit = 60
 
     // MARK: - 扫描
 
@@ -177,14 +249,29 @@ final class CacheCleaner: @unchecked Sendable {
             }
         }
 
+        var budget = Self.measureBudget
+        var measured = targets.map { measure($0, group: $0.needsEscape ? group : nil, budget: &budget) }
+
         if includeOthers, let group {
-            if let other = makeOtherAppsTarget(group: group, log: log) {
-                targets.append(other)
-            }
+            let others = scanOtherApps(group: group, log: log, budget: &budget)
+            measured.append(contentsOf: others)
         }
 
-        var budget = Self.measureBudget
-        return targets.map { measure($0, group: $0.needsEscape ? group : nil, budget: &budget) }
+        // 系统级三项：不需要容器，路径固定
+        measured.append(contentsOf: makeSystemTargets().map {
+            measure($0, group: group, budget: &budget)
+        })
+
+        // 其他 App 按占用从大到小，空的不占位置
+        let othersSorted = measured
+            .filter { $0.scope == .other }
+            .sorted { $0.bytes > $1.bytes }
+            .prefix(Self.otherDisplayLimit)
+
+        var ordered: [CacheTarget] = measured.filter { $0.scope != .other }
+        let insertAt = ordered.firstIndex { $0.scope == .system } ?? ordered.count
+        ordered.insert(contentsOf: othersSorted, at: insertAt)
+        return ordered
     }
 
     // MARK: 本 App
@@ -195,6 +282,7 @@ final class CacheCleaner: @unchecked Sendable {
                 id: "app.staging",
                 scope: .app,
                 title: "解包暂存",
+                subtitle: nil,
                 detail: "导入壁纸时解压出的临时目录，任务中断会残留在这里",
                 paths: [SandboxEscape.canonicalPath(NSTemporaryDirectory())],
                 prefixFilter: "posterdrop-",
@@ -210,6 +298,7 @@ final class CacheCleaner: @unchecked Sendable {
                     id: "app.caches",
                     scope: .app,
                     title: "本 App 缓存",
+                    subtitle: nil,
                     detail: "索引与界面缓存，删掉后会自动重建",
                     paths: [SandboxEscape.canonicalPath(caches.path)],
                     prefixFilter: nil,
@@ -231,6 +320,7 @@ final class CacheCleaner: @unchecked Sendable {
                 id: "pb." + entry.rel,
                 scope: .posterBoard,
                 title: entry.title,
+                subtitle: nil,
                 detail: entry.detail,
                 paths: [container + "/" + entry.rel],
                 prefixFilter: nil,
@@ -241,53 +331,104 @@ final class CacheCleaner: @unchecked Sendable {
         }
     }
 
+    // MARK: 系统级
+
+    private func makeSystemTargets() -> [CacheTarget] {
+        Self.systemEntries.map { entry in
+            CacheTarget(
+                id: "sys." + entry.path,
+                scope: .system,
+                title: entry.title,
+                subtitle: entry.path.replacingOccurrences(of: "/private/var/mobile/", with: "~/"),
+                detail: entry.detail,
+                paths: [entry.path],
+                prefixFilter: nil,
+                needsEscape: true,
+                recommended: false,
+                caution: entry.caution
+            )
+        }
+    }
+
     // MARK: 其他 App
 
-    /// 把「所有可见容器」的 Library/Caches + tmp 汇总成一项。
-    /// 逐个 App 列出来会让页面变成几百行，而且用户也无法判断该清谁。
-    private func makeOtherAppsTarget(group: String, log: @escaping (String) -> Void) -> CacheTarget? {
+    /// 每个 App 一项：只把真实存在的白名单目录塞进去，扫完按大小排序。
+    private func scanOtherApps(
+        group: String,
+        log: @escaping (String) -> Void,
+        budget: inout Int
+    ) -> [CacheTarget] {
         let containers = ContainerLocator.discoverContainers(log: log)
         guard !containers.isEmpty else {
             log("没有发现其他 App 的容器，跳过")
-            return nil
+            return []
         }
 
-        // PosterBoard 自己的容器已经在上面单独列了，这里不重复
         let posterBoard = ContainerLocator.rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
-        var paths: [String] = []
+        let posterCanonical = posterBoard.map { SandboxEscape.canonicalPath($0) }
 
-        for container in containers.prefix(Self.otherAppLimit) {
-            if let posterBoard, SandboxEscape.canonicalPath(container) == SandboxEscape.canonicalPath(posterBoard) {
-                continue
+        var results: [CacheTarget] = []
+        var scanned = 0
+
+        for container in containers.prefix(Self.otherScanLimit) {
+            let canonical = SandboxEscape.canonicalPath(container)
+            if let posterCanonical, canonical == posterCanonical { continue }
+
+            scanned += 1
+            if scanned % 25 == 0 {
+                log("其他 App：已扫描 \(scanned) 个容器…")
             }
-            // 只把真实存在的缓存目录塞进来，避免清理时反复判空
-            for rel in ["Library/Caches", "tmp"] {
-                let path = container + "/" + rel
+
+            // 容器根签发一次，能覆盖子树时后续判断都便宜；覆盖不了会在 measure 里补签
+            _ = try? SandboxEscape.grant(path: canonical, group: group)
+
+            var paths: [String] = []
+            var labels: [String] = []
+            for entry in Self.containerEntries {
+                let path = canonical + "/" + entry.rel
                 if SandboxEscape.exists(path) {
                     paths.append(path)
+                    labels.append(shortLabel(entry.rel))
                 }
             }
+            guard !paths.isEmpty else { continue }
+
+            let identifier = SandboxEscape.containerIdentifier(at: canonical)
+            let identifierText = (identifier?.isEmpty == false) ? identifier : nil
+            let title = identifierText ?? (canonical as NSString).lastPathComponent
+
+            results.append(
+                CacheTarget(
+                    id: "other." + canonical,
+                    scope: .other,
+                    title: title,
+                    subtitle: identifierText == nil ? (canonical as NSString).lastPathComponent : nil,
+                    detail: "\(paths.count) 项：" + labels.joined(separator: "、"),
+                    paths: paths,
+                    prefixFilter: nil,
+                    needsEscape: true,
+                    recommended: false,
+                    caution: nil
+                )
+            )
         }
 
-        guard !paths.isEmpty else {
-            log("其他 App 没有可清理的缓存")
-            return nil
+        log("其他 App：扫描 \(scanned) 个容器，\(results.count) 个有缓存")
+        return results
+    }
+
+    private func shortLabel(_ rel: String) -> String {
+        switch rel {
+        case "Library/Caches": return "缓存"
+        case "tmp": return "tmp"
+        case "Library/SplashBoard": return "快照"
+        case "Library/Saved Application State": return "窗口状态"
+        case "Library/HTTPStorages": return "网络缓存"
+        case "Library/Cookies": return "Cookie"
+        case "Library/WebKit": return "网页数据"
+        case "Library/Logs": return "日志"
+        default: return rel
         }
-
-        let count = max(1, paths.count / 2)
-        log("其他 App：扫描 \(count) 个容器，命中 \(paths.count) 个缓存目录")
-
-        return CacheTarget(
-            id: "other.apps",
-            scope: .other,
-            title: "其他 App 缓存",
-            detail: "\(count) 个 App 的 Library/Caches 与 tmp",
-            paths: paths,
-            prefixFilter: nil,
-            needsEscape: true,
-            recommended: false,
-            caution: "部分 App 清掉缓存后需要重新登录或重新下载离线内容"
-        )
     }
 
     // MARK: - 统计
@@ -555,6 +696,11 @@ final class CacheCleaner: @unchecked Sendable {
         guard canonical.hasPrefix("/"), canonical.count > 1 else { return false }
 
         if needsEscape {
+            // 系统级：只认固定白名单，精确相等或在其之下
+            for allowed in Self.systemAllowlist where canonical == allowed || canonical.hasPrefix(allowed + "/") {
+                return true
+            }
+
             let marker = "/private/var/mobile/Containers/Data/"
             guard canonical.hasPrefix(marker) else { return false }
             // 必须在 <family>/<UUID>/… 之下，至少再深一层
