@@ -418,7 +418,7 @@ final class AppModel: ObservableObject {
         isScanningCache = true
         defer { isScanningCache = false }
         cacheProgress = 0
-        cacheScanNote = includeOthers ? "正在统计各 App 缓存（分批并行，目标 30 秒内）…" : "正在统计缓存大小…"
+        cacheScanNote = includeOthers ? "正在统计各 App 缓存（目录句柄直读，目标 20 秒内）…" : "正在统计缓存大小…"
 
         // 这里不主动定位容器：清理页应该秒开。没有路径时只统计本 App 的部分，
         // 页面上会提示先去「诊断」探测一次。

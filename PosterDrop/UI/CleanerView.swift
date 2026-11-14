@@ -265,7 +265,7 @@ struct CleanerView: View {
                 Spacer()
             }
 
-            Text("逐个 App 统计缓存、临时文件、快照、Cookie 与网页数据，按占用从大到小排。第一次扫描要反查容器并逐个签发扩展，需要十几秒。")
+            Text("逐个 App 统计缓存、临时文件、快照、Cookie 与网页数据，按占用从大到小排。容器父目录一次授权后直接进入每个 App，通常几秒内完成；没有缓存索引时会先花一次时间反查容器。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

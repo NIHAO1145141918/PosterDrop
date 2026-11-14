@@ -31,7 +31,10 @@ enum ContainerLocator {
     static let posterBoardBundleID = "com.apple.PosterBoard"
     private static let storeRelativePath = "Library/Application Support/PRBPosterExtensionDataStore"
 
-    private static let applicationRoot = "/private/var/mobile/Containers/Data/Application"
+    /// 所有 App 容器的父目录。一次扩展就能覆盖整棵子树，是批量操作的关键入口。
+    static let applicationRoot = "/private/var/mobile/Containers/Data/Application"
+
+    static var applicationRootPath: String { applicationRoot }
     private static let pluginRoot = "/private/var/mobile/Containers/Data/PluginKitPlugin"
     private static let daemonRoot = "/private/var/mobile/Containers/Data/InternalDaemon"
 
@@ -579,9 +582,16 @@ enum ContainerLocator {
 
     /// 签发容器父目录并常驻：一次扩展覆盖所有 App 容器，之后遍历、读 xattr 都不再逐个签发。
     /// 这是把「几百次 XPC」压成「一次 XPC」的关键。
+    ///
+    /// - Parameter requireWrite: 清理时传 true。父目录只读能扫不能删，所以先试可写；
+    ///   写探针失败（系统把父目录设成只读）时退回只读，至少扫描还能走快路径。
     @discardableResult
-    static func grantApplicationRoot(group: String) -> Bool {
-        (try? SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)) != nil
+    static func grantApplicationRoot(group: String, requireWrite: Bool = false) -> Bool {
+        if requireWrite,
+           (try? SandboxEscape.grant(path: applicationRoot, group: group, requireWrite: true, pinned: true)) != nil {
+            return true
+        }
+        return (try? SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)) != nil
     }
 
     private static func scanParentDirectory(group: String, target: String, log: (String) -> Void) -> Hit? {

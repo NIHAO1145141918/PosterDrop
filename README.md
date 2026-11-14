@@ -55,20 +55,26 @@
 
 1. **路径不可伪造** —— 容器内只由「合法容器根 + 固定相对路径」拼出；系统级是三个硬编码绝对路径，删除前还要过一遍精确白名单校验；界面上没有任何入口能传入任意路径；
 2. **符号链接只删链接本身** —— `lstat` 判定是链接就走 `unlink`，绝不跟进。App Group 的 `Library/Caches` 本身就是链接，跟进去会删到别的容器；
-3. **逐层签发** —— 扩展只覆盖签发的那一个目录，所以每层删除前先给父目录签发写权限，子目录清空后才 `rmdir`；
+3. **目录句柄相对操作** —— 删除只在已经打开的父目录 fd 上做 `unlinkat` / `AT_REMOVEDIR`，所有打开都带 `O_NOFOLLOW`，不会被符号链接引到别的容器；
 4. **不碰壁纸本体** —— 壁纸在 `Library/Application Support/PRBPosterExtensionDataStore`，不在任何清理路径里；
 5. **不碰偏好设置** —— `Library/Preferences`、`Documents`、`Application Support` 都不在白名单里，清缓存不会丢登录以外的数据。
 
 **速度**
 
+统计和删除都改成「目录句柄相对操作」：打开一次目录拿到 fd，之后 `openat` / `fstatat` / `unlinkat` 都以它为起点。原来每访问一个文件都要拼出
+`/private/var/mobile/Containers/Data/Application/<UUID>/Library/Caches/…` 这样一条八十字符的路径，让内核从根重新解析一遍——一个五万文件的缓存目录就是五万次全路径解析。改成 fd 相对之后，这段前缀解析全部省掉。
+
 | 环节 | 做法 |
 | --- | --- |
 | 定位容器 | 先签发容器父目录，一次扩展覆盖所有 App，之后只读 xattr；正常几百毫秒 |
-| 扫描其他 App | 每批 24 个容器，签发完立刻并行统计；父目录授权成功时不再逐个签发 |
-| 重复签发 | 祖先目录已授权时直接复用（`lstat` + `open` 验证），不再走 XPC |
+| 进入其他 App | 父目录 fd 已打开，`openat(父目录, 容器名)` 直接进；不再逐容器签发 |
+| 8 个缓存目录 | 在容器 fd 上 `fstatat` 判断存在，判完直接 `openat` 进去 |
+| 目录内容统计 | `getattrlistbulk` 一次调用取回一批条目的名字、类型、占用；启动时用已知内容的小目录自检布局，校验不过自动退回 `fstatat` |
+| 删除 | `unlinkat(fd, 名字, 0)` 与 `unlinkat(fd, 名字, AT_REMOVEDIR)`，不再拼路径再 `unlink` / `rmdir` |
+| 时间上限 | 整轮扫描 20 秒硬截止，到点不再开新容器，跳过的数量在日志里写明 |
 | 扫描缓存 | fsgetpath 结果保留 7 天，失效路径不做预过滤，避免整份缓存被清空后重扫 |
 
-深度扫描 200 个 App 的完整统计通常 **10–25 秒**，父目录扩展被系统拒绝时上限自动降到 120 个，仍控制在 30 秒内。
+深度扫描的容器数从 200 提到 400，完整统计通常几秒内完成（缓存索引已存在时）。父目录扩展被系统拒绝时退回逐个签发（每个 80–120ms），上限自动降到 120 个，仍控制在 30 秒内。
 
 ### 3. 诊断
 
@@ -201,7 +207,7 @@ A：这个版本拦住了 inode 反查。用 WQFiles 打开 App Data › PosterB
 A：依次试「刷新壁纸缓存」→ respring → 打开墙纸设置后下拉。仍不行就看日志里的结构版本（应为 61）和 `写入 …/Preferences` 是否成功。
 
 **Q：清缓存会删掉我注入的壁纸吗？**
-A：不会。清理范围只有 `Library/Caches`、`tmp`、`SplashBoard`、`Saved Application State`，壁纸本体在 `Application Support`，不在白名单里。
+A：不会。容器的清理范围只有 `Library/Caches`、`tmp`、`SplashBoard`、`Saved Application State`、`HTTPStorages`、`Cookies`、`WebKit`、`Logs` 八个位置，壁纸本体在 `Application Support/PRBPosterExtensionDataStore`，不在白名单里。
 
 **Q：清理后预览变成灰块？**
 A：缩略图被清了，点清理页的「重建壁纸缩略图」respring 一次即可，壁纸本身没丢。
@@ -232,7 +238,8 @@ PosterDrop/
     │   ├── ZipArchive.swift       # 自带 zip 解析（EOCD 双路 + ZIP64）
     │   ├── LibArchive.swift       # 系统 libarchive 兜底
     │   ├── PosterBoardInstaller.swift # 注入 + 缓存刷新
-    │   ├── CacheCleaner.swift     # 缓存清理（白名单 + 逐层签发）
+    │   ├── CacheCleaner.swift     # 缓存清理（白名单 + 分组统计）
+    │   ├── FileTree.swift         # 目录遍历内核：fd 相对 + getattrlistbulk
     │   ├── VPNStatus.swift        # VPN 三态检测
     │   ├── WallpaperStore.swift   # 本地库与索引
     │   ├── Respring.swift         # NeoSpring

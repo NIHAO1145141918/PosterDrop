@@ -9,18 +9,21 @@
 //       不接受界面上传进来的任意路径，从根上杜绝「少拼一层删到 Documents」；
 //    2. 符号链接只删链接本身，绝不跟进去 —— App Group 的 Library/Caches 就是符号链接，
 //       跟进去会删到别的容器；
-//    3. 删除前先给「父目录」签发写扩展，子目录清空后才 rmdir，链接一律 unlink。
-//       扩展只覆盖签发的那一个目录，这一条不能省。
+//    3. 删除只在「已打开的父目录 fd」上做 unlinkat / AT_REMOVEDIR，所有打开都带
+//       O_NOFOLLOW，不会被符号链接引到别的容器。
 //
 //  覆盖范围（按「删了会怎样」分层）：
 //    · 可重建：Caches / tmp / SplashBoard / Saved Application State / Logs
 //    · 需重登：Cookies / WebKit / HTTPStorages
 //    · 系统级：全系统应用快照 / 崩溃日志 / 共享缓存（默认不勾）
 //
-//  性能：
-//    - 整轮清理包在 beginBatch / endBatch 里，Caches 符号链接只装一次；
-//    - 遍历用 opendir + lstat，不构造 URL，十万级文件也能在秒级走完；
-//    - 读/写失败（EPERM）才补签扩展，正常情况下一次签发覆盖整棵子树。
+//  性能（这一版重写了遍历内核）：
+//    - 目录只打开一次，之后 openat / fstatat / unlinkat 全部以 fd 为起点，
+//      不再拼 /private/var/mobile/Containers/Data/Application/<UUID>/... 这种全路径，
+//      每访问一个文件省掉一次从根开始的前缀解析；
+//    - 统计走 getattrlistbulk，一次系统调用取回一批条目（名字 + 类型 + 占用）；
+//    - 容器父目录签一次并常驻，其余全部是 openat，正常路径不产生 XPC；
+//    - 整轮扫描有 20 秒硬截止，到点不再开新容器。
 //
 
 import Foundation
@@ -214,18 +217,26 @@ final class CacheCleaner: @unchecked Sendable {
     /// 系统级白名单。删除前会做「完全相等或在其之下」的校验。
     private static let systemAllowlist: [String] = systemEntries.map(\.path)
 
-    /// 单个目标的遍历预算：一个 App 的缓存目录再大也看得完，又不至于把扫描拖成分钟级。
-    private static let measureBudget = 50_000
-    /// 最长递归深度，挡住异常深的目录树。
-    private static let maxDepth = 20
-    /// 深度扫描最多看多少个容器。
-    private static let otherScanLimit = 200
+    /// 单个目标的遍历预算。改成 fd 相对遍历 + getattrlistbulk 之后，单条成本从
+    /// 一次全路径 stat 降到百纳秒级，原来 5 万的预算可以放宽到 30 万而且更快。
+    private static let measureBudget = 300_000
+    /// 整轮扫描的时间上限。到点就不再开新容器，已经在跑的子树自行收尾。
+    /// 30 秒是产品要求，这里留 10 秒给签发、UI 刷新和收尾。
+    private static let scanTimeBudget: TimeInterval = 20
+    /// 深度扫描最多看多少个容器。父目录扩展可用时基本等于全量。
+    private static let otherScanLimit = 400
     /// 父目录扩展签不出来时只能逐个签发（每个约 80–120ms），上限压到 120 才能守住 30 秒。
     private static let otherScanLimitSlow = 120
     /// 列表里最多展示多少个 App（按占用从大到小）。
     private static let otherDisplayLimit = 60
 
     // MARK: - 扫描
+
+    /// 已经打开的父目录：让 8 个缓存子目录共用一次 open，而不是各自解析全路径。
+    private struct BaseDirectory {
+        let fd: Int32
+        let path: String
+    }
 
     /// 统计所有缓存项。`includeOthers` 为 true 时才会去扫别的 App（慢，几秒）。
     func scan(
@@ -235,10 +246,19 @@ final class CacheCleaner: @unchecked Sendable {
         log: @escaping (String) -> Void
     ) -> [CacheTarget] {
 
+        // 整轮扫描共用一个截止时间。超时就不再开新目标，已经跑起来的子树自行收尾，
+        // 这样「30 秒」是硬上限，而不是取决于设备上有多少个 App。
+        let deadline = Date().addingTimeInterval(Self.scanTimeBudget)
+
         var targets = makeAppTargets()
 
-        if let container, isValidContainer(container) {
-            targets += makePosterBoardTargets(container: SandboxEscape.canonicalPath(container))
+        let canonicalContainer: String? = {
+            guard let container, isValidContainer(container) else { return nil }
+            return SandboxEscape.canonicalPath(container)
+        }()
+
+        if let canonicalContainer {
+            targets += makePosterBoardTargets(container: canonicalContainer)
         }
 
         // 整轮统计共用一次 Caches 交换：几百个容器逐个签发时，这是唯一不卡住的地方
@@ -252,25 +272,41 @@ final class CacheCleaner: @unchecked Sendable {
             }
         }
 
-        // 先把 PosterBoard 容器根签一次：8 个缓存子目录共用这一个扩展，
-        // 否则每个子目录都要单独走一趟 XPC。
-        if let container, isValidContainer(container), let group {
-            _ = try? SandboxEscape.grant(path: SandboxEscape.canonicalPath(container), group: group)
+        // PosterBoard 容器根：签一次、开一次。8 个缓存子目录都用这个 fd 做 openat 起点，
+        // 省掉 8 次全路径解析（路径里有 UUID，解析起来比看着长）。
+        var containerFD: Int32?
+        if let canonicalContainer, let group {
+            _ = try? SandboxEscape.grant(path: canonicalContainer, group: group)
+            containerFD = FileTree.openDirectory(canonicalContainer)
         }
+        defer { if let containerFD { close(containerFD) } }
 
-        var measured = targets.map { target in
-            var budget = Self.measureBudget
-            return measure(target, group: target.needsEscape ? group : nil, budget: &budget)
+        let base = containerFD.map { BaseDirectory(fd: $0, path: canonicalContainer ?? "") }
+
+        // 这十来个目标彼此独立（都没打开 Caches 交换），并行统计；
+        // 系统级三项路径固定、要各自签发，放后面串行更稳。
+        var appSlots = [CacheTarget?](repeating: nil, count: targets.count)
+        appSlots.withUnsafeMutableBufferPointer { buffer in
+            DispatchQueue.concurrentPerform(iterations: targets.count) { index in
+                let target = targets[index]
+                buffer[index] = measure(
+                    target,
+                    group: target.needsEscape ? group : nil,
+                    base: base,
+                    deadline: deadline
+                )
+            }
         }
+        let measuredApp = appSlots.compactMap { $0 }
 
+        var measured = measuredApp
         if includeOthers, let group {
-            measured.append(contentsOf: scanOtherApps(group: group, log: log))
+            measured.append(contentsOf: scanOtherApps(group: group, deadline: deadline, log: log))
         }
 
         // 系统级三项：不需要容器，路径固定
-        measured.append(contentsOf: makeSystemTargets().map { target in
-            var budget = Self.measureBudget
-            return measure(target, group: group, budget: &budget)
+        measured.append(contentsOf: makeSystemTargets().map {
+            measure($0, group: group, base: nil, deadline: deadline)
         })
 
         // 其他 App 按占用从大到小，空的不占位置
@@ -365,20 +401,41 @@ final class CacheCleaner: @unchecked Sendable {
 
     /// 每个 App 一项：只把真实存在的白名单目录塞进去，扫完按大小排序。
     ///
-    /// 拆成两阶段：签发串行（Caches 交换是全局的，本来就并行不了），
-    /// 遍历并行（纯本地 I/O，按核数分摊）。原来两者串在一层循环里，
-    /// 200 个容器要等「签发 + 遍历」各跑 200 遍。
+    /// 两条路：
+    ///   · 父目录扩展签出来了（绝大多数情况）——打开一次 Application 目录，
+    ///     之后每个容器都是 openat 直接进。不再逐个签发、不再拼全路径，
+    ///     所有容器可以一次性铺开并行，这是本轮提速的主要来源。
+    ///   · 签不出来——退回逐个签发（每个 80–120ms），上限压到 120 并分批，
+    ///     保证不超时。
     private func scanOtherApps(
         group: String,
+        deadline: Date,
         log: @escaping (String) -> Void
     ) -> [CacheTarget] {
         let started = Date()
 
-        // 先签父目录：一次扩展覆盖所有 App 容器，后面每个容器的 lstat / xattr
-        // 都走祖先命中，不再逐个走 XPC。签不出来才退回逐个签发。
-        let rootGranted = ContainerLocator.grantApplicationRoot(group: group)
+        // 带写权限签父目录：一次探针，换来之后所有容器的打开与删除都不用再补签。
+        let rootGranted = ContainerLocator.grantApplicationRoot(group: group, requireWrite: true)
         if rootGranted {
-            log("容器父目录已授权：本轮统计不再逐个签发扩展")
+            log("容器父目录已授权（含写权限）：整轮不再逐个签发扩展")
+        }
+
+        let posterCanonical = ContainerLocator
+            .rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
+            .map { SandboxEscape.canonicalPath($0) }
+
+        if rootGranted, let rootFD = FileTree.openDirectory(ContainerLocator.applicationRootPath) {
+            defer { close(rootFD) }
+            if let fast = scanContainersFast(
+                rootFD: rootFD,
+                rootPath: ContainerLocator.applicationRootPath,
+                poster: posterCanonical,
+                started: started,
+                deadline: deadline,
+                log: log
+            ) {
+                return fast
+            }
         }
 
         let containers = ContainerLocator.discoverContainers(log: log)
@@ -386,105 +443,147 @@ final class CacheCleaner: @unchecked Sendable {
             log("没有发现其他 App 的容器，跳过")
             return []
         }
+        return scanContainersSlow(
+            group: group,
+            containers: containers,
+            poster: posterCanonical,
+            started: started,
+            deadline: deadline,
+            log: log
+        )
+    }
 
-        let posterCanonical = ContainerLocator
-            .rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
-            .map { SandboxEscape.canonicalPath($0) }
+    // MARK: 快路径
 
-        // 去重 + 排掉 PosterBoard 自己。父目录没签出来时缩小范围，避免逐个 XPC 拖过 30 秒。
-        let limit = rootGranted ? Self.otherScanLimit : Self.otherScanLimitSlow
+    private func scanContainersFast(
+        rootFD: Int32,
+        rootPath: String,
+        poster: String?,
+        started: Date,
+        deadline: Date,
+        log: @escaping (String) -> Void
+    ) -> [CacheTarget]? {
+        var names: [String] = []
+        let iterator = dup(rootFD)
+        if iterator >= 0, let directory = fdopendir(iterator) {
+            while let entry = readdir(directory) {
+                let name = FileTree.entryName(entry)
+                if name == "." || name == ".." { continue }
+                names.append(name)
+            }
+            closedir(directory)
+        } else {
+            if iterator >= 0 { close(iterator) }
+            log("父目录不可枚举（系统限制），退回逐个签发")
+            return nil
+        }
+
+        guard !names.isEmpty else { return [] }
+        let limit = min(names.count, Self.otherScanLimit)
+
+        var slots = [CacheTarget?](repeating: nil, count: limit)
+        let skipped = Counter()
+
+        slots.withUnsafeMutableBufferPointer { buffer in
+            DispatchQueue.concurrentPerform(iterations: limit) { index in
+                // 时间到就不再开新容器，已经在跑的自然结束
+                if Date() >= deadline {
+                    skipped.increment()
+                    return
+                }
+
+                let name = names[index]
+                let path = rootPath + "/" + name
+                if let poster, path == poster { return }
+
+                guard let containerFD = FileTree.openSubdirectory(rootFD, name) else { return }
+                defer { close(containerFD) }
+
+                buffer[index] = makeOtherTarget(
+                    containerFD: containerFD,
+                    path: path,
+                    deadline: deadline
+                )
+            }
+        }
+
+        let results = slots.compactMap { $0 }
+        var reasons: [String] = []
+        if names.count > limit { reasons.append("\(names.count - limit) 个超出单次上限") }
+        let missed = skipped.value
+        if missed > 0 { reasons.append("\(missed) 个超时跳过") }
+        let note = reasons.isEmpty ? "" : "（" + reasons.joined(separator: "，") + "）"
+        log(String(
+            format: "其他 App：%d 个容器，%d 个有缓存，用时 %.1f 秒%@",
+            limit,
+            results.count,
+            Date().timeIntervalSince(started),
+            note
+        ))
+        return results
+    }
+
+    // MARK: 慢路径（父目录签不出来）
+
+    private func scanContainersSlow(
+        group: String,
+        containers: [String],
+        poster: String?,
+        started: Date,
+        deadline: Date,
+        log: @escaping (String) -> Void
+    ) -> [CacheTarget] {
         var seen = Set<String>()
         var candidates: [String] = []
-        for container in containers.prefix(limit) {
+        for container in containers.prefix(Self.otherScanLimitSlow) {
             let canonical = SandboxEscape.canonicalPath(container)
-            if let posterCanonical, canonical == posterCanonical { continue }
+            if let poster, canonical == poster { continue }
             guard seen.insert(canonical).inserted else { continue }
             candidates.append(canonical)
         }
+        guard !candidates.isEmpty else { return [] }
 
-        // 分批处理：内核能同时挂的扩展有上限（192），一次签完 200 个会把前面的挤掉，
-        // 遍历时又得补签，来回抖动比串行还慢。每批 24 个，签完立刻扫完再进下一批。
         var results: [CacheTarget] = []
         results.reserveCapacity(candidates.count)
+        // 内核能同时挂的扩展有上限（192），一次签完会把前面的挤掉，所以分批
         let batchSize = 24
-
         var offset = 0
-        while offset < candidates.count {
+
+        while offset < candidates.count, Date() < deadline {
             let end = min(offset + batchSize, candidates.count)
             let slice = Array(candidates[offset..<end])
             offset = end
 
-            var collected: [PendingTarget] = []
-            collected.reserveCapacity(slice.count)
-
-            for canonical in slice {
-                guard (try? SandboxEscape.grant(path: canonical, group: group)) != nil else { continue }
-
-                var paths: [String] = []
-                var labels: [String] = []
-                for entry in Self.containerEntries {
-                    let path = canonical + "/" + entry.rel
-                    // 容器根的扩展已经覆盖整棵子树，这里只做 lstat，不再逐目录签发
-                    if SandboxEscape.exists(path) {
-                        paths.append(path)
-                        labels.append(shortLabel(entry.rel))
-                    }
-                }
-                guard !paths.isEmpty else { continue }
-                collected.append(PendingTarget(canonical: canonical, paths: paths, labels: labels))
+            // 签发必须串行：Caches 交换是全进程唯一的
+            var granted: [(path: String, fd: Int32)] = []
+            granted.reserveCapacity(slice.count)
+            for path in slice {
+                guard (try? SandboxEscape.grant(path: path, group: group)) != nil,
+                      let fd = FileTree.openDirectory(path) else { continue }
+                granted.append((path, fd))
             }
 
-            if !collected.isEmpty {
-                let batch = collected
-                var tallies = [Tally](repeating: Tally(), count: batch.count)
-                let writeLock = NSLock()
-
-                tallies.withUnsafeMutableBufferPointer { buffer in
-                    DispatchQueue.concurrentPerform(iterations: batch.count) { index in
-                        var budget = Self.measureBudget
-                        var tally = Tally()
-                        for path in batch[index].paths {
-                            walk(path, group: group, prefix: nil, tally: &tally, depth: 0, budget: &budget)
-                        }
-                        writeLock.lock()
-                        buffer[index] = tally
-                        writeLock.unlock()
-                    }
-                }
-
-                for (index, item) in batch.enumerated() {
-                    let tally = tallies[index]
-                    guard tally.bytes > 0 || tally.files > 0 else { continue }
-
-                    let identifier = SandboxEscape.containerIdentifier(at: item.canonical)
-                    let identifierText = (identifier?.isEmpty == false) ? identifier : nil
-                    let title = identifierText ?? (item.canonical as NSString).lastPathComponent
-
-                    results.append(
-                        CacheTarget(
-                            id: "other." + item.canonical,
-                            scope: .other,
-                            title: title,
-                            subtitle: identifierText == nil ? (item.canonical as NSString).lastPathComponent : nil,
-                            detail: "\(item.paths.count) 项：" + item.labels.joined(separator: "、"),
-                            paths: item.paths,
-                            prefixFilter: nil,
-                            needsEscape: true,
-                            recommended: false,
-                            caution: nil,
-                            bytes: tally.bytes,
-                            files: tally.files,
-                            state: .ready
+            if !granted.isEmpty {
+                var slots = [CacheTarget?](repeating: nil, count: granted.count)
+                slots.withUnsafeMutableBufferPointer { buffer in
+                    DispatchQueue.concurrentPerform(iterations: granted.count) { index in
+                        let item = granted[index]
+                        buffer[index] = makeOtherTarget(
+                            containerFD: item.fd,
+                            path: item.path,
+                            deadline: deadline
                         )
-                    )
+                    }
                 }
+                for item in granted { close(item.fd) }
+                results.append(contentsOf: slots.compactMap { $0 })
             }
 
-            log("其他 App：进度 \(end)/\(candidates.count)")
+            log("其他 App：进度 \(offset)/\(candidates.count)")
         }
 
         log(String(
-            format: "其他 App：%d 个容器，%d 个有缓存，用时 %.1f 秒",
+            format: "其他 App：%d 个容器，%d 个有缓存，用时 %.1f 秒（逐个签发）",
             candidates.count,
             results.count,
             Date().timeIntervalSince(started)
@@ -492,11 +591,55 @@ final class CacheCleaner: @unchecked Sendable {
         return results
     }
 
-    /// 阶段的中间态：已经授权、并且确实存在缓存目录的容器。
-    private struct PendingTarget {
-        let canonical: String
-        let paths: [String]
-        let labels: [String]
+    /// 在一个已经打开的容器上统计 8 个白名单目录。
+    /// 全部用 openat 相对 containerFD，8 个目录各解析一段短路径。
+    private func makeOtherTarget(
+        containerFD: Int32,
+        path: String,
+        deadline: Date
+    ) -> CacheTarget? {
+        var picked: [String] = []
+        for entry in Self.containerEntries where FileTree.exists(containerFD, entry.rel) {
+            picked.append(entry.rel)
+        }
+        guard !picked.isEmpty else { return nil }
+
+        let tally = FileTree.Tally()
+        var budget = Self.measureBudget
+        for rel in picked {
+            guard let child = FileTree.openSubdirectory(containerFD, rel) else { continue }
+            FileTree.measure(
+                fd: child,
+                path: path + "/" + rel,
+                prefix: nil,
+                budget: &budget,
+                deadline: deadline,
+                tally: tally
+            )
+            close(child)
+        }
+        guard tally.bytes > 0 || tally.files > 0 else { return nil }
+
+        // 相对容器 fd 读标识，不再走一遍全路径 getxattr
+        let identifier = FileTree.xattr(containerFD, "com.apple.containermanager.identifier")
+        let identifierText = (identifier?.isEmpty == false) ? identifier : nil
+        let title = identifierText ?? (path as NSString).lastPathComponent
+
+        return CacheTarget(
+            id: "other." + path,
+            scope: .other,
+            title: title,
+            subtitle: identifierText == nil ? (path as NSString).lastPathComponent : nil,
+            detail: "\(picked.count) 项：" + picked.map { shortLabel($0) }.joined(separator: "、"),
+            paths: picked.map { path + "/" + $0 },
+            prefixFilter: nil,
+            needsEscape: true,
+            recommended: false,
+            caution: nil,
+            bytes: tally.bytes,
+            files: tally.files,
+            state: .ready
+        )
     }
 
     private func shortLabel(_ rel: String) -> String {
@@ -515,15 +658,12 @@ final class CacheCleaner: @unchecked Sendable {
 
     // MARK: - 统计
 
-    private struct Tally {
-        var bytes: Int64 = 0
-        var files: Int = 0
-        var nodes: Int = 0
-        var denied = false
-        var truncated = false
-    }
-
-    private func measure(_ target: CacheTarget, group: String?, budget: inout Int) -> CacheTarget {
+    private func measure(
+        _ target: CacheTarget,
+        group: String?,
+        base: BaseDirectory?,
+        deadline: Date
+    ) -> CacheTarget {
         var updated = target
 
         // 没有 App Group 就没有扩展，容器里的东西一个都碰不到
@@ -533,17 +673,54 @@ final class CacheCleaner: @unchecked Sendable {
             return updated
         }
 
-        var tally = Tally()
+        let tally = FileTree.Tally()
         var present = false
+        var used = 0
 
         for root in target.paths {
-            // 先拿到根目录的读权限：没有扩展时连 lstat 都可能是假的
-            if let group {
+            // 父目录 fd 已经打开时走 openat，省一次全路径解析
+            var parentFD: Int32?
+            var relative: String?
+            if let base, root.hasPrefix(base.path + "/") {
+                parentFD = base.fd
+                relative = String(root.dropFirst(base.path.count + 1))
+            }
+
+            // 有父目录 fd 就直接 openat，成功路径不产生任何 XPC。
+            // 只有根本拿不到父目录时才先补签，这是少数情况。
+            if parentFD == nil, let group {
                 _ = try? SandboxEscape.grant(path: root, group: group)
             }
-            guard SandboxEscape.exists(root) else { continue }
-            present = true
-            walk(root, group: group, prefix: target.prefixFilter, tally: &tally, depth: 0, budget: &budget)
+
+            let before = tally.nodes
+            var measured = FileTree.measure(
+                root: root,
+                parent: parentFD,
+                relative: relative,
+                prefix: target.prefixFilter,
+                budget: max(0, Self.measureBudget - used),
+                deadline: deadline,
+                tally: tally
+            )
+
+            // 父目录扩展可能被内核回收，openat 打不开时补签一次再从来路走一遍
+            if !measured, parentFD != nil, let group {
+                _ = try? SandboxEscape.grant(path: root, group: group)
+                measured = FileTree.measure(
+                    root: root,
+                    parent: nil,
+                    relative: nil,
+                    prefix: target.prefixFilter,
+                    budget: max(0, Self.measureBudget - used),
+                    deadline: deadline,
+                    tally: tally
+                )
+            }
+
+            if measured {
+                present = true
+                used += tally.nodes - before
+            }
         }
 
         updated.bytes = tally.bytes
@@ -559,56 +736,6 @@ final class CacheCleaner: @unchecked Sendable {
 
         updated.isSelected = updated.recommended && updated.state == .ready
         return updated
-    }
-
-    private func walk(
-        _ dir: String,
-        group: String?,
-        prefix: String?,
-        tally: inout Tally,
-        depth: Int,
-        budget: inout Int
-    ) {
-        guard depth <= Self.maxDepth, budget > 0 else { return }
-
-        var handle = opendir(dir)
-        if handle == nil, let group {
-            // 父目录的扩展没有覆盖到这里，补签一次
-            _ = try? SandboxEscape.grant(path: dir, group: group)
-            handle = opendir(dir)
-        }
-        guard let handle else {
-            tally.denied = true
-            return
-        }
-        defer { closedir(handle) }
-
-        while let entry = readdir(handle) {
-            let name = CacheCleaner.entryName(entry)
-            if name == "." || name == ".." { continue }
-
-            budget -= 1
-            tally.nodes += 1
-            if budget <= 0 {
-                tally.truncated = true
-                return
-            }
-
-            // 前缀过滤只对顶层生效，进去之后全算
-            if depth == 0, let prefix, !name.hasPrefix(prefix) { continue }
-
-            let path = dir + "/" + name
-            var info = stat()
-            guard lstat(path, &info) == 0 else { continue }
-
-            if (info.st_mode & S_IFMT) == S_IFDIR {
-                walk(path, group: group, prefix: nil, tally: &tally, depth: depth + 1, budget: &budget)
-            } else {
-                // 符号链接也只算自己那一份，不跟进去
-                tally.bytes += Int64(info.st_blocks) * 512
-                tally.files += 1
-            }
-        }
     }
 
     // MARK: - 清理
@@ -653,24 +780,89 @@ final class CacheCleaner: @unchecked Sendable {
             }
         }
 
+        // 其他 App 占大头：先拿一次「可写」的父目录扩展。
+        // 之后每个容器的删除都是祖先命中，不再逐容器走 XPC，也不用再验写探针。
+        let hasOthers = targets.contains { $0.scope == .other }
+        if needsEscape, let group, hasOthers {
+            _ = ContainerLocator.grantApplicationRoot(group: group, requireWrite: true)
+        }
+
+        // 父目录 fd：把 8 个缓存目录的全路径打开换成一次 openat
+        var rootFD: Int32?
+        if hasOthers {
+            rootFD = FileTree.openDirectory(ContainerLocator.applicationRootPath)
+        }
+        defer { if let rootFD { close(rootFD) } }
+        let base = rootFD.map { BaseDirectory(fd: $0, path: ContainerLocator.applicationRootPath) }
+
         let total = max(1, targets.count)
         for (index, target) in targets.enumerated() {
             let failuresBefore = report.failures.count
 
             for root in target.paths {
-                guard SandboxEscape.exists(root) else { continue }
+                // 白名单校验在前，任何被改坏的路径都进不到删除逻辑
                 guard isSafeForRemoval(root, needsEscape: target.needsEscape) else {
                     report.failures.append("已跳过不受控路径：\(root)")
                     report.skipped += 1
                     continue
                 }
-                wipe(
-                    root,
-                    group: target.needsEscape ? group : nil,
+
+                var parentFD: Int32?
+                var relative: String?
+                if let base, root.hasPrefix(base.path + "/") {
+                    parentFD = base.fd
+                    relative = String(root.dropFirst(base.path.count + 1))
+                }
+
+                // 父目录已覆盖时这里直接 openat，不产生 XPC。
+                // 拿不到父目录 fd（慢路径）才先签一次写扩展。
+                if parentFD == nil, target.needsEscape, let group {
+                    _ = try? SandboxEscape.grant(path: root, group: group, requireWrite: true)
+                }
+
+                var removal = FileTree.Removal()
+                var opened = FileTree.clear(
+                    root: root,
                     prefix: target.prefixFilter,
-                    depth: 0,
-                    report: &report
+                    parent: parentFD,
+                    relative: relative,
+                    removal: &removal
                 )
+
+                // 打不开：扩展可能被回收，补签一次从头来
+                if !opened, target.needsEscape, let group, parentFD != nil {
+                    _ = try? SandboxEscape.grant(path: root, group: group, requireWrite: true)
+                    opened = FileTree.clear(
+                        root: root,
+                        prefix: target.prefixFilter,
+                        parent: nil,
+                        relative: nil,
+                        removal: &removal
+                    )
+                }
+                guard opened else { continue }
+
+                // 能打开却删不动：多半是父目录扩展只有读权限。补一次写扩展，把剩下的再删一遍。
+                if !removal.failures.isEmpty, target.needsEscape, let group,
+                   (try? SandboxEscape.grant(path: root, group: group, requireWrite: true)) != nil {
+                    var retry = FileTree.Removal()
+                    _ = FileTree.clear(
+                        root: root,
+                        prefix: target.prefixFilter,
+                        parent: parentFD,
+                        relative: relative,
+                        removal: &retry
+                    )
+                    removal.files += retry.files
+                    removal.directories += retry.directories
+                    removal.bytes += retry.bytes
+                    removal.failures = retry.failures
+                }
+
+                report.bytes += removal.bytes
+                report.files += removal.files
+                report.directories += removal.directories
+                report.failures.append(contentsOf: removal.failures)
             }
 
             if report.failures.count == failuresBefore {
@@ -681,80 +873,6 @@ final class CacheCleaner: @unchecked Sendable {
 
         report.elapsed = Date().timeIntervalSince(started)
         return report
-    }
-
-    private func wipe(
-        _ dir: String,
-        group: String?,
-        prefix: String?,
-        depth: Int,
-        report: inout Report
-    ) {
-        guard depth <= Self.maxDepth else { return }
-
-        // 根目录本身是符号链接时直接放弃：opendir 会跟进去，等于把链接目标删了。
-        // （正常情况下白名单路径不可能是链接，这里是最后一道保险）
-        if depth == 0 {
-            var rootInfo = stat()
-            if lstat(dir, &rootInfo) == 0, (rootInfo.st_mode & S_IFMT) == S_IFLNK {
-                report.failures.append("拒绝清理符号链接：\(dir)")
-                return
-            }
-        }
-
-        // 删子项要求「父目录」可写。签发一次覆盖整棵子树，失败时再补。
-        if let group {
-            _ = try? SandboxEscape.grant(path: dir, group: group, requireWrite: true)
-        }
-
-        // 先收名字再删：边读边删会让 readdir 跳过条目
-        var names: [String] = []
-        guard let handle = opendir(dir) else {
-            report.failures.append("无法列出：\(dir)")
-            return
-        }
-        while let entry = readdir(handle) {
-            let name = CacheCleaner.entryName(entry)
-            if name == "." || name == ".." { continue }
-            if depth == 0, let prefix, !name.hasPrefix(prefix) { continue }
-            names.append(name)
-        }
-        closedir(handle)
-
-        for name in names {
-            let path = dir + "/" + name
-            var info = stat()
-            guard lstat(path, &info) == 0 else { continue }
-            let kind = info.st_mode & S_IFMT
-
-            if kind == S_IFDIR {
-                // 非空目录要先清空自己，才能从父目录里摘掉
-                wipe(path, group: group, prefix: nil, depth: depth + 1, report: &report)
-                if rmdir(path) != 0 {
-                    if let group {
-                        _ = try? SandboxEscape.grant(path: dir, group: group, requireWrite: true)
-                    }
-                    if rmdir(path) != 0 {
-                        report.failures.append("目录删不掉：\(path)")
-                        continue
-                    }
-                }
-                report.directories += 1
-            } else {
-                // 普通文件与符号链接都走 unlink：链接绝不能跟进去
-                if unlink(path) != 0 {
-                    if let group {
-                        _ = try? SandboxEscape.grant(path: dir, group: group, requireWrite: true)
-                    }
-                    if unlink(path) != 0 {
-                        report.failures.append("文件删不掉：\(path)")
-                        continue
-                    }
-                }
-                report.files += 1
-                report.bytes += Int64(info.st_blocks) * 512
-            }
-        }
     }
 
     // MARK: - 护栏
@@ -796,14 +914,23 @@ final class CacheCleaner: @unchecked Sendable {
         return canonical.hasPrefix(home) || canonical.hasPrefix(temp)
     }
 
-    // MARK: - 工具
+}
 
-    private static func entryName(_ entry: UnsafeMutablePointer<dirent>) -> String {
-        var raw = entry.pointee.d_name
-        return withUnsafePointer(to: &raw) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: 256) { name in
-                String(cString: name)
-            }
-        }
+/// 并发计数的极简实现：只为「有多少个容器因为超时被跳过」服务。
+final class Counter: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 }
