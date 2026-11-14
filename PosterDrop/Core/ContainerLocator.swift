@@ -416,12 +416,6 @@ enum ContainerLocator {
             return []
         }
 
-        // 先抽样，确认 fsgetpath 能看到别的 App；看不到就别白扫几百万次
-        guard sampleSeesOthers(fsgetpath: fsgetpath, probe: probe) else {
-            log("   ⚠️ fsgetpath 只能解析本 App 自己的文件，这个系统版本拦住了路径反查")
-            return []
-        }
-
         let upper = min(probe.limit, explicitUpper ?? probe.limit)
 
         // 增量：上次扫到哪，就从那附近继续
@@ -441,7 +435,10 @@ enum ContainerLocator {
 
         var nextChunk: Int64 = 0
         var hits = Set<String>()
-        /// 被时间预算打断：这一轮没扫完，不能推进 limit，否则下次会以为整段扫过了
+        /// 已完成扫描的 chunk 编号。被时间预算打断时靠它算出「连续扫到哪」，
+        /// 把 limit 推进到那里——否则下一轮会从段首重新扫，永远补不完后 70%。
+        var doneChunks = Set<Int64>()
+        /// 被时间预算打断
         var aborted = false
         let lock = NSLock()
         // fsgetpath 是阻塞 syscall，时间几乎全花在内核的 vnode 查找上（无效 id 也一样贵），
@@ -519,6 +516,9 @@ enum ContainerLocator {
                             lock.unlock()
                             local.removeAll(keepingCapacity: true)
                         }
+                        lock.lock()
+                        doneChunks.insert(chunk)
+                        lock.unlock()
 
                         if chunk % progressStep == 0 {
                             let percent = Int(Double(chunk) / Double(chunks) * 100)
@@ -531,6 +531,11 @@ enum ContainerLocator {
 
         let cost = String(format: "%.1f", Date().timeIntervalSince(started))
         log("   扫了 \(total) 个 object id，用时 \(cost) 秒，得到 \(hits.count) 个容器（\(workers) 线程）")
+        // 只在扫了足够大的区间还一无所获时才提示。几百个 id 的补缝段本来就该是空的，
+        // 拿它判断「被沙盒拦住」会误报——上一版就是在这里把整轮补扫掐断的。
+        if hits.isEmpty, total > 1_000_000, !aborted {
+            log("   ⚠️ 这一段没有任何容器反查结果，可能被沙盒拦住了路径反查")
+        }
         // 增量扫描只覆盖新 id，保存时要把旧缓存合并进来
         let previous = (UserDefaults.standard.array(forKey: ScanCache.paths) as? [String]) ?? []
         let merged = Array(Set(previous + Array(hits)))
@@ -538,43 +543,27 @@ enum ContainerLocator {
         // 分段时只扫了前 10%，如果不写，那 131 个容器就随返回值一起丢了
         // （清理页只认缓存，不认本次调用的返回值）。
         if aborted {
-            // 时间预算用完：只合并路径，limit 原地不动，下次还从这一段继续
-            saveScanPaths(merged)
+            // 时间预算用完：limit 推进到「连续扫完」的位置。
+            //
+            // 之前这里是原地不动，结果 30%→100% 那 8550 万个 id 每轮都从
+            // 段首重扫一遍、又永远扫不完——三轮清理扫的是同一段。
+            // 现在按 chunk 的连续前缀算，扫到哪算到哪，下一轮接着往后。
+            var contiguous: Int64 = 0
+            lock.lock()
+            while doneChunks.contains(contiguous) { contiguous += 1 }
+            lock.unlock()
+            let reached = min(upper, first + contiguous * chunkSize - 1)
+            if reached > first {
+                saveScanCache(merged, limit: reached)
+                let remaining = upper - reached
+                log("   时间预算到，已推进到 \(reached)（剩 \(remaining / 1_000_000) 百万个 id，下次继续）")
+            } else {
+                saveScanPaths(merged)
+            }
         } else {
             saveScanCache(merged, limit: upper)
         }
         return Array(hits)
-    }
-
-    /// 抽样 2000 个 id，看解析出来的路径里有没有别的 App 容器。
-    private static func sampleSeesOthers(fsgetpath: @escaping FSGetPath, probe: ScanProbe) -> Bool {
-        var id = probe.fsid
-        var buffer = [CChar](repeating: 0, count: 1200)
-        var ownPrefix = FileManager.default.temporaryDirectory.path
-        if ownPrefix.hasPrefix("/var/") { ownPrefix = "/private" + ownPrefix }
-        ownPrefix = (ownPrefix as NSString).deletingLastPathComponent
-
-        var found = 0
-        var resolved = 0
-        let samples = 600
-        // 在整个 id 区间均匀抽样：老 App 的容器 id 可能远低于上界，只抽上半段会漏判
-        let lower: Int64 = 1
-
-        buffer.withUnsafeMutableBufferPointer { raw in
-            guard let base = raw.baseAddress else { return }
-            for _ in 0..<samples {
-                let candidate = UInt64.random(in: UInt64(lower)...UInt64(max(lower, probe.limit)))
-                let length = fsgetpath(base, raw.count, &id, candidate)
-                guard length > 0 else { continue }
-                resolved += 1
-                let path = String(cString: base)
-                if path.contains("/Containers/") && !path.hasPrefix(ownPrefix) {
-                    found += 1
-                }
-            }
-        }
-        // 一个都解析不到也算“看不到”
-        return found > 0 || resolved == 0
     }
 
     // MARK: - 扫描缓存
@@ -736,12 +725,17 @@ enum ContainerLocator {
                     break
                 }
                 let boundary = min(ceiling, max(boundaryFrom, Int64(Double(ceiling) * fraction)))
-                guard boundary > boundaryFrom else { continue }
+                // 小于一百万个 id 的「补缝段」不值得单独扫一轮：
+                // 上一轮如果已经扫到 10%，这里只会剩几十个 id，白搭一次进度日志，
+                // 而且这种小段天然是空的，容易让人误以为权限没了。并到下一段一起扫。
+                guard boundary - boundaryFrom > 1_000_000 else { continue }
                 let stage = scanApplicationContainers(
                     log: log, from: boundaryFrom + 1, to: boundary, deadline: deadline
                 )
                 all = Array(Set(all + stage))
-                boundaryFrom = boundary
+                // 用缓存里记的实际进度，而不是段尾：这一段如果被时间预算打断，
+                // 段尾和真实位置差着几千万个 id，直接赋 boundary 会把中间整段漏掉。
+                boundaryFrom = max(boundaryFrom, cachedScanLimit() ?? boundary)
             }
         } else {
             all = Array(Set(all + scanApplicationContainers(log: log, deadline: deadline)))
