@@ -8,9 +8,12 @@
 - 同一份 IPA 装 iPhone 和 iPad，iPad 支持分屏、台前调度、拖放导入
 - 支持 `.tendies` / `.zip` / 已解压的文件夹 / 整容器归档
 - 自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
-- 自带缓存清理，能清理 PosterBoard 和其他 App 的缓存与临时文件
+- 自带缓存清理，本 App / PosterBoard / 其他 App / 系统四级范围，容器内覆盖 8 类位置
 
-**[下载最新版（v1.1）](https://github.com/Nova1145/PosterDrop/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
+**[下载最新版（v1.4.1）](https://github.com/NIHAO1145141918/PosterDrop/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
+
+> **1.4.1**：修复 1.4.0 的容器索引误判——没有 `container-manager` 权限时，`container_query` 只返回自己却不报错，
+> 导致深扫后「其他 App」整组消失。现改为剔除自身后少于 3 条即判定为沙盒限制并回落。详见 [Releases](https://github.com/NIHAO1145141918/PosterDrop/releases/tag/v1.4.1)。
 
 > 仅供安全研究与个人设备定制使用，请只在你自己拥有或获授权管理的设备上运行。
 
@@ -40,7 +43,7 @@
 | --- | --- | --- |
 | 本 App | 解包暂存（导入中断留下的临时目录）、本 App 缓存 | ✅ |
 | PosterBoard | 缓存与缩略图、`tmp`、应用快照、窗口状态、网络缓存、Cookie、网页数据、运行日志 | 前两项 ✅ |
-| 其他 App | **逐个 App 一项**，按占用从大到小排，展开可看每一项包含哪些位置 | ⬜（需深度扫描） |
+| 其他 App | **逐个 App 一项**，按占用从大到小排，展开可看每一项包含哪些位置（上限 400 个容器，30 秒软上限，超时降级为只算 Caches + tmp） | ⬜（需深度扫描） |
 | 系统 | 全系统应用快照、崩溃日志、系统共享缓存 | ⬜ |
 
 顶部显示可清理总量，勾选后底部按钮直接给出「清理 3 项 · 136 MB」。清掉 PosterBoard 缩略图或系统缓存后会提示一键 respring 重建，避免预览变灰块让人以为壁纸丢了。
@@ -76,19 +79,31 @@
 
 **为什么能扫到几百 MB**
 
-关键不是「每个 App 删得更深」，而是**能不能进得去**。一次父目录扩展通常覆盖不全，剩下的大 App 会整片消失，
-表现就是「只清掉几十 MB」。这一版为此加了三条路：
+关键不是「每个 App 删得更深」，而是**能不能进得去**。一次父目录扩展覆盖不全时，剩下的大 App 会整片消失，
+表现就是「只清掉几十 MB」。为此依次尝试三条路：
 
-1. 父目录扩展成功时，`openat` 直接进，正常路径零 XPC；
-2. 父目录签不出来，就用 `container_query_set_class(2)` 枚举全部 App 数据容器，再对每个容器调
-   `container_object_sandbox_extension_activate`——一次激活换一个能 `open` 的路径，省掉 Caches 交换的往返。
-   这条和 3105 的主路径一致，只是没有它的内核漏洞，所以完全依赖签名里有没有 container-manager 权限；
-3. 都不行才退回逐个签发（每个 80–120ms）。
+1. **父目录扩展**：签出 `/private/var/mobile/Containers/Data/Application` 一次，之后每个容器 `openat`
+   直接进，正常路径零 XPC；
+2. **容器索引**：用 `container_query_set_class(2)` 枚举全部 App 数据容器，再对每个容器调
+   `container_object_sandbox_extension_activate`。这条和 3105 的主路径一致；
+3. **逐个签发**：每条 80–120ms，走 Caches 符号链接交换，最慢但兼容性最好。
+
+第二条路有个必须点明的前提：**没有 `com.apple.private.security.container-manager` 权限时，
+`container_query_set_class(2)` 不会报错，而是安静地只返回调用者自己的容器。** 1.4.0 把这唯一的
+一条结果当成成功，直接跳过后续路径，导致「其他 App」整片只剩自己——比不加索引还差。
+
+1.4.1 起，索引结果会先剔除自身容器，少于 3 条即判定为沙盒限制并回落；打开率低于一半也回落
+（拿到路径不等于能进，`activate` 没生效时路径是死的）。所以在只带 App Groups 的 ad-hoc 签名下，
+实际干活的是第三条。
 
 扫描日志会把真实数字写出来：`N 个容器，打开 X 个、被拒 Y 个，K 个有缓存，D 个降级统计`。
-如果「打开」远小于「N」，说明卡在权限而不是速度，再多时间也扫不出东西——这时该做的是补签名权限，不是调参数。
+三个数的含义很明确：
 
-深度扫描的容器数从 200 提到 400（慢路径 400），降级机制保证排在后面的容器不会因为超时被丢掉。
+- **X 接近 N** —— 覆盖没问题，MB 数取决于设备里 App 的真实缓存量；
+- **X 远小于 N** —— 卡在权限，再多时间也扫不出东西，该补签名权限而不是调参数；
+- **N 很小（几十）** —— 容器发现入口本身就窄，问题在 `fsgetpath` 这一层。
+
+深度扫描上限 400 个容器，30 秒软上限保证排在后面的容器不会因为超时被丢掉。
 
 ### 3. 诊断
 
@@ -271,7 +286,7 @@ PosterDrop/
 
 1. 推送仓库，Actions 会自动跑 `Build IPA`（也支持手动 `workflow_dispatch`）；
 2. 在运行记录的 **Artifacts** 下载 `PosterDrop-ipa`，解压得到 `PosterDrop.ipa`；
-3. 打 tag（如 `v1.1.0`）并推送，IPA 会自动附到 Release。
+3. 打 tag（如 `v1.4.1`）并推送，IPA 会自动附到 Release。
 
 工作流：安装 XcodeGen → `xcodegen generate` → `build-ipa.sh Release` → 上传产物。脚本会去掉 Xcode 的空签名，再用 `Config/PosterDrop.entitlements` 做 ad-hoc 签名，让重签工具能读到 App Groups。
 
