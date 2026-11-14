@@ -117,9 +117,9 @@ enum ContainerLocator {
         if let code = parent.code { kernelCode = code }
 
         if let code = kernelCode, isFatalGrantCode(code) {
-            log(stamp("❌ 签发通道被拒绝（代码 \(code)），判定为系统已修补，中止后续查找"))
-            log("   ②③④⑤ 走的都是同一条扩展通道，跑下去不会成功，只会多等几分钟（全盘扫描尤其）。")
-            log("   已实测：26.0 – 27.2 可用；27.3 起 containermanagerd 不再签发跨容器扩展。")
+            log(stamp("❌ 两条签发通道都被拒绝（代码 \(code)），中止后续查找"))
+            log("   part_domain 与 Caches 交换都没过，②③④⑤ 依赖同一条通道，继续跑只会多等几分钟。")
+            log("   请把这一段日志连同系统版本发给开发者。")
             return nil
         }
 

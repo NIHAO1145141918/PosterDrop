@@ -568,14 +568,14 @@ final class AppModel: ObservableObject {
         }.value
     }
 
-    /// 支持区间：iOS 26.0 – 27.2。
+    /// 支持区间：iOS 26.0 起。
     /// Apple 在 iOS 18 之后直接跳到 iOS 26（年份命名），不存在 19–25 这几个版本号。
+    /// 26.x 走 Caches 交换，27.x 走 part_domain；27.3 实测仍然可用。
     nonisolated static var osSupport: (ok: Bool, text: String) {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let text = "\(v.majorVersion).\(v.minorVersion)"
         if v.majorVersion < 26 { return (false, text) }
         if v.majorVersion > 27 { return (false, text) }
-        if v.majorVersion == 27, v.minorVersion > 2 { return (false, text) }
         return (true, text)
     }
 
@@ -585,7 +585,7 @@ final class AppModel: ObservableObject {
         guard support.ok else {
             let message = """
             ❌ 当前系统 iOS \(support.text) 不在支持范围。
-            本项目只支持 iOS 26.0 – 27.2：低于 26.0 没有这条签发缺陷；27.3 起 containermanagerd 不再签发跨容器扩展，实测返回 -6，功能和缓存清理都不可用。
+            本项目支持 iOS 26.0 起：低于 26.0 没有这条签发缺陷。26.x 走 Caches 交换，27.x 走 part_domain，两条通道会自动挑。
             """
             directStatus = message
             LogBus.shared.append("— 直连通道自检 —")
