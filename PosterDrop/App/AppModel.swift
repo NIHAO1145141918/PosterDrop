@@ -587,7 +587,17 @@ final class AppModel: ObservableObject {
         // 先列一遍容器分类。签不出来时，这份清单能直接回答「systemgroup 里
         // 有没有 mobilegestaltcache」「签名注入的 group 在不在系统表里」。
         LogBus.shared.append("— 容器分类枚举 —")
-        for (cls, label) in [(UInt64(13), "systemgroup"), (UInt64(7), "appgroup"), (UInt64(2), "application")] {
+        // 10 / 3 是这一版新加的：3105 用 `MCMActivateContainerPath(10, "com.apple.lsd", …)`
+        // 拿 lsd 的容器，再读它的 Library/Caches 里的 csstore。
+        // 如果这两行也是 0，就彻底排除了「某个 class 漏试了」的可能，
+        // 剩下的解释只有调用者身份。
+        for (cls, label) in [
+            (UInt64(13), "systemgroup"),
+            (UInt64(7), "appgroup"),
+            (UInt64(2), "application"),
+            (UInt64(10), "服务容器 class 10"),
+            (UInt64(3), "插件容器 class 3")
+        ] {
             if let list = ContainerIndex.identifiers(containerClass: cls, limit: 80) {
                 LogBus.shared.append("\(label)（class \(cls)）：\(list.count) 个")
                 if !list.isEmpty {

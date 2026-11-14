@@ -44,29 +44,35 @@ enum LaunchServicesStore {
     /// 任何一步不通都返回 nil，调用方回落到 `fsgetpath` 扫描，不会抛错也不会卡住。
     static func harvest(log: (String) -> Void) -> Harvest? {
         for directory in candidateDirectories {
-            guard let names = listDirectory(directory) else { continue }
+            if let hit = harvest(directory: directory, log: log) { return hit }
+        }
+        return nil
+    }
 
-            // csstore 的名字形如 com.apple.LaunchServices-014501-v2.csstore。
-            // 不同系统版本后缀有出入，所以只卡前缀和后缀。
-            let stores = names.filter {
-                $0.hasPrefix("com.apple.LaunchServices") && $0.hasSuffix(".csstore")
-            }
-            guard !stores.isEmpty else { continue }
+    /// 扫描指定目录下的 csstore。调用方负责让这个目录可读（必要时先签发）。
+    static func harvest(directory: String, log: (String) -> Void) -> Harvest? {
+        guard let names = listDirectory(directory) else { return nil }
 
-            for name in stores {
-                let path = (directory as NSString).appendingPathComponent(name)
-                guard let data = readFile(path) else { continue }
-                guard data.count > 1_024 else { continue }
+        // csstore 的名字形如 com.apple.LaunchServices-014501-v2.csstore。
+        // 不同系统版本后缀有出入，所以只卡前缀和后缀。
+        let stores = names.filter {
+            $0.hasPrefix("com.apple.LaunchServices") && $0.hasSuffix(".csstore")
+        }
+        guard !stores.isEmpty else { return nil }
 
-                let result = extract(from: data, log: log)
-                if !result.containers.isEmpty || result.identifiers.count > 20 {
-                    log("   csstore 命中：\(path)（\(data.count / 1024) KB）")
-                    return Harvest(
-                        identifiers: result.identifiers,
-                        containers: result.containers,
-                        source: path
-                    )
-                }
+        for name in stores {
+            let path = (directory as NSString).appendingPathComponent(name)
+            guard let data = readFile(path) else { continue }
+            guard data.count > 1_024 else { continue }
+
+            let result = extract(from: data, log: log)
+            if !result.containers.isEmpty || result.identifiers.count > 20 {
+                log("   csstore 命中：\(path)（\(data.count / 1024) KB）")
+                return Harvest(
+                    identifiers: result.identifiers,
+                    containers: result.containers,
+                    source: path
+                )
             }
         }
         return nil

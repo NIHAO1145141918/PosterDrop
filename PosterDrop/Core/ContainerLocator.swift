@@ -65,6 +65,11 @@ enum ContainerLocator {
         }
         func done(_ hit: Hit) -> Hit {
             log(stamp("✅ 用时 \(String(format: "%.2f", Date().timeIntervalSince(started))) 秒"))
+            // 定位成功后顺手预热 csstore。此刻不在批次交换里，签发别的容器是安全的；
+            // 放后台是因为它最多要读 64MB，不该拖慢启动。
+            DispatchQueue.global(qos: .utility).async {
+                ContainerLocator.prewarmLaunchServices(group: group, log: log)
+            }
             return hit
         }
 
@@ -594,26 +599,81 @@ enum ContainerLocator {
     /// csstore 的解析结果。一个进程只读一次 64MB 文件。
     private static var csstoreResult: LaunchServicesStore.Harvest?
     private static var csstoreTried = false
+    private static var csstoreRunning = false
     private static let csstoreLock = NSLock()
 
+    /// 取 csstore 的结果。定位阶段已经预热过就直接用，没预热就现场跑一次。
     private static func csstoreHarvest(
+        group: String,
         log: @escaping (String) -> Void
     ) -> LaunchServicesStore.Harvest? {
+        prewarmLaunchServices(group: group, log: log)
         csstoreLock.lock()
         defer { csstoreLock.unlock() }
-        if csstoreTried { return csstoreResult }
+        return csstoreResult
+    }
+
+    private static func storeLaunchServices(
+        _ harvest: LaunchServicesStore.Harvest,
+        log: @escaping (String) -> Void
+    ) {
+        csstoreLock.lock()
         csstoreTried = true
-        log("⓪ 试读 LaunchServices csstore（3105 同款快路径）…")
-        let started = Date()
-        let result = LaunchServicesStore.harvest(log: log)
-        if let result {
-            let cost = String(format: "%.2f", Date().timeIntervalSince(started))
-            log("   用时 \(cost) 秒：\(result.identifiers.count) 个 App，\(result.containers.count) 个容器")
-        } else {
-            log("   csstore 读不到（沙盒拦住了 /var/mobile/Library/Caches），回落到 inode 反查")
+        csstoreResult = harvest
+        csstoreLock.unlock()
+        log("   csstore：\(harvest.identifiers.count) 个 App，\(harvest.containers.count) 个容器")
+    }
+
+    /// 定位成功后顺手预热 csstore。
+    ///
+    /// 3105 读 csstore 的入口是 `com.apple.lsd` 的容器——`ContainerStore.swift:355`
+    /// 那句 `MCMActivateContainerPath(10, "com.apple.lsd", …)`，拿到容器后读它的
+    /// `Library/Caches/com.apple.LaunchServices-*-v2.csstore`。
+    /// 我们用同样的路径，只是把「拿容器位置」换成自己的 bundleID 查询。
+    ///
+    /// 必须在这里做，不能等清理时：`scan()` 一开始就 `beginBatch`，把本 App 的
+    /// `Library/Caches` 换成了指向目标的交换链接，这时再对另一个路径签发会
+    /// retarget 掉那个链接，后面几百个容器的统计全部错位。
+    static func prewarmLaunchServices(group: String, log: @escaping (String) -> Void) {
+        csstoreLock.lock()
+        if csstoreTried || csstoreRunning {
+            csstoreLock.unlock()
+            return
         }
-        csstoreResult = result
-        return result
+        csstoreRunning = true
+        csstoreLock.unlock()
+        defer {
+            csstoreLock.lock()
+            csstoreRunning = false
+            csstoreTried = true
+            csstoreLock.unlock()
+        }
+
+        // ① 纯读。如果 /var/mobile/Library/Caches 本来就允许读，这条路最快也最干净。
+        if let hit = LaunchServicesStore.harvest(log: log) {
+            storeLaunchServices(hit, log: log)
+            return
+        }
+
+        // ② 走 lsd 容器。class 10 是 InternalDaemon，3105 查的就是这个。
+        guard let daemon = queryByIdentifier(bundleID: "com.apple.lsd", classes: [10, 12]) else {
+            csstoreLock.lock(); csstoreTried = true; csstoreLock.unlock()
+            log("   csstore：家目录不可读，lsd 容器也查不到（按身份过滤）")
+            return
+        }
+        log("   csstore：找到 com.apple.lsd 容器 \(daemon)")
+        guard (try? SandboxEscape.grant(path: daemon, group: group)) != nil else {
+            csstoreLock.lock(); csstoreTried = true; csstoreLock.unlock()
+            log("   csstore：lsd 容器签不出来，回落到 inode 反查")
+            return
+        }
+        let caches = (daemon as NSString).appendingPathComponent("Library/Caches")
+        if let hit = LaunchServicesStore.harvest(directory: caches, log: log) {
+            storeLaunchServices(hit, log: log)
+        } else {
+            csstoreLock.lock(); csstoreTried = true; csstoreLock.unlock()
+            log("   csstore：lsd 的 Caches 里没有可读的 csstore")
+        }
     }
 
     /// 给清理页用：拿一批已知的容器路径。
@@ -626,21 +686,6 @@ enum ContainerLocator {
         deadline: Date? = nil
     ) -> [String] {
         var cached = loadScanCache()
-
-        // ⓪ csstore：一次读文件换掉一整轮 inode 扫描。
-        // 3105 拿 App 清单走的就是这条路（LaunchServices 的二进制库里存着全部
-        // bundleID 和 DataContainerURL）。成本 0.3 秒，对比 fsgetpath 的 250 秒。
-        if cached.isEmpty, let harvest = csstoreHarvest(log: log) {
-            if !harvest.containers.isEmpty {
-                // 只存路径、不推进 limit：csstore 是「已安装 App」的快照，
-                // 不等于整卷扫完（可能存在容器但 App 已卸载的残留）。
-                // 标记成扫完会让以后的增量永远补不回剩下的部分。
-                saveScanPaths(harvest.containers)
-                log("csstore 直取 \(harvest.containers.count) 个容器，跳过全卷扫描")
-                return harvest.containers
-            }
-            log("csstore 只有 bundleID 没有容器路径，仍需扫描卷")
-        }
 
         // 1.4.8 的分段扫描只推进了 limit、没有保存路径，缓存可能只剩 noteHit 写的一两条。
         // 这种缓存不能信：limit 已经跑到卷尾，但路径是残的，增量永远补不回来，必须整体重扫。
@@ -659,6 +704,19 @@ enum ContainerLocator {
         if !cached.isEmpty, complete {
             log("复用上次的扫描结果：\(cached.count) 个容器")
             return cached
+        }
+
+        // ⓪ csstore：一次读文件换掉一整轮 inode 扫描。
+        // 3105 拿 App 清单走的就是这条路（LaunchServices 的二进制库里存着全部
+        // bundleID 和 DataContainerURL）。成本 0.3 秒，对比 fsgetpath 的 250 秒。
+        // 缓存不完整时也要试：它给的是「全部已安装 App」，正好补上缺的那半卷。
+        if let harvest = csstoreHarvest(group: group, log: log), !harvest.containers.isEmpty {
+            let merged = Array(Set(cached + harvest.containers))
+            // 只存路径、不推进 limit：csstore 是「已安装 App」的快照，
+            // 不等于整卷扫完（可能存在容器但 App 已卸载的残留）。
+            saveScanPaths(merged)
+            log("csstore 直取 \(harvest.containers.count) 个容器，合并后 \(merged.count) 个")
+            return merged
         }
 
         if cached.isEmpty {
@@ -991,7 +1049,20 @@ enum ContainerLocator {
 
     // MARK: - 按 bundle id 查
 
-    private static func queryByIdentifier(bundleID: String) -> String? {
+    /// 按 bundleID 查容器路径。
+    ///
+    /// `classes` 默认把 Application(2)、InternalDaemon(10)、PluginKitPlugin(12) 都试一遍。
+    /// 3105 的 `MCMActivateContainerPath(2, bundleID, …)` 走的也是这套 C API，
+    /// 它能返回路径、我们只能拿到空，差别不在 class 也不在参数——
+    /// `mcm_bridge.m` 里 `MCMActivateContainerPath` 的第一段就写着：
+    /// 主 bundle id 必须是 `com.apple.mobile.MobileHouseArrest`，否则直接返回 nil。
+    /// 那个身份带着 `com.apple.private.container-manager`，自签拿不到，
+    /// 所以 daemon 按调用者身份把结果过滤成空。这里多试几个 class 只是把
+    /// 「是不是某个 class 漏了」这个可能性彻底排掉。
+    private static func queryByIdentifier(
+        bundleID: String,
+        classes: [UInt64] = [2, 10, 12]
+    ) -> String? {
         guard let manager = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL) else {
             return nil
         }
@@ -1038,18 +1109,20 @@ enum ContainerLocator {
             identifierValues.append(array)
         }
 
-        for value in identifierValues {
-            guard let value else { continue }
-            guard let query = create() else { continue }
-            defer { freeQuery(query) }
+        for cls in classes {
+            for value in identifierValues {
+                guard let value else { continue }
+                guard let query = create() else { continue }
+                defer { freeQuery(query) }
 
-            setClass(query, 2)
-            setOtherOwners?(query, true)
-            setIdentifiers(query, value)
+                setClass(query, cls)
+                setOtherOwners?(query, true)
+                setIdentifiers(query, value)
 
-            if let result = single(query), let pathPointer = getPath(result) {
-                let path = String(cString: pathPointer)
-                if !path.isEmpty { return path }
+                if let result = single(query), let pathPointer = getPath(result) {
+                    let path = String(cString: pathPointer)
+                    if !path.isEmpty { return path }
+                }
             }
         }
         return nil
