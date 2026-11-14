@@ -419,10 +419,11 @@ final class CacheCleaner: @unchecked Sendable {
         let started = Date()
 
         // 带写权限签父目录：一次探针，换来之后所有容器的打开与删除都不用再补签。
-        let rootGranted = ContainerLocator.grantApplicationRoot(group: group, requireWrite: true)
+        let root = ContainerLocator.grantApplicationRootDetailed(group: group, requireWrite: true)
+        let rootGranted = root.ok
         log(rootGranted
-            ? "容器父目录已授权（含写权限）：整轮不再逐个签发扩展"
-            : "容器父目录授权失败：改走索引激活 / 逐个签发")
+            ? "容器父目录已授权（\(root.detail)）：整轮不再逐个签发扩展"
+            : "容器父目录授权失败（\(root.detail)）：改走索引激活 / 逐个签发")
 
         let posterCanonical = ContainerLocator
             .rememberedContainerPath(for: ContainerLocator.posterBoardBundleID)
@@ -481,7 +482,11 @@ final class CacheCleaner: @unchecked Sendable {
         deadline: Date,
         log: @escaping (String) -> Void
     ) -> [CacheTarget]? {
-        guard let entries = ContainerIndex.snapshot(activate: true) else { return nil }
+        guard let entries = ContainerIndex.snapshot(activate: true) else {
+            let why = ContainerIndex.denialReason ?? "符号缺失"
+            log("索引激活不可用（\(why)），回落逐个签发")
+            return nil
+        }
         guard !entries.isEmpty else { return nil }
 
         let candidates = entries
@@ -536,6 +541,13 @@ final class CacheCleaner: @unchecked Sendable {
             degraded.value,
             Date().timeIntervalSince(started)
         ))
+
+        // 打开率过低说明 activate 没生效，光有路径没用，交回给逐个签发。
+        let openedCount = opened.value
+        if openedCount == 0 || openedCount * 2 < total {
+            log("索引打开率 \(openedCount)/\(total) 偏低，回落逐个签发")
+            return nil
+        }
         return results
     }
 
@@ -635,7 +647,8 @@ final class CacheCleaner: @unchecked Sendable {
     /// 拿不到就返回 nil —— 只是标题变回 UUID，统计逻辑不受影响。
     private func containerIdentifiers(rootPath: String, log: @escaping (String) -> Void) -> [String: String]? {
         guard let entries = ContainerIndex.snapshot() else {
-            log("容器索引不可用（签名没有 container-manager 权限），标题显示 UUID")
+            let why = ContainerIndex.denialReason ?? "符号缺失"
+            log("容器索引不可用（\(why)），标题显示 UUID")
             return nil
         }
         var map: [String: String] = [:]

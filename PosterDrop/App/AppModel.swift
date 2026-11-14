@@ -436,7 +436,16 @@ final class AppModel: ObservableObject {
                 container: target.isEmpty ? nil : target,
                 group: group,
                 includeOthers: includeOthers,
-                log: { line in LogBus.shared.append(line) }
+                log: { line in
+                    LogBus.shared.append(line)
+                    // 逐个签发时一批 24 个容器要 2 秒以上，不把进度顶到界面上，
+                    // 用户会以为卡死。
+                    guard line.hasPrefix("其他 App：进度") else { return }
+                    let progress = line.replacingOccurrences(of: "其他 App：进度 ", with: "")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.cacheScanNote = "正在统计其他 App（\(progress)），已签发的容器会一直保留…"
+                    }
+                }
             )
         }.value
 

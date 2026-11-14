@@ -109,15 +109,33 @@ enum ContainerIndex {
     /// 上一次探测的结论。枚举被拒时不必每次扫描都再问一遍。
     private static let probeLock = NSLock()
     private static var enumerationDenied = false
+    private static var lastDenialReason: String?
+
+    /// 上一次枚举为什么不可用。给日志用，避免用户每次只看到「不可用」三个字。
+    static var denialReason: String? {
+        probeLock.lock()
+        defer { probeLock.unlock() }
+        return lastDenialReason
+    }
+
+    /// 别的 App 容器少于这个数，就认为沙盒只放行了本 App，这条路径没有意义。
+    ///
+    /// iOS 上无 container-manager 权限时，`container_query_set_class(2)` 不报错，
+    /// 而是安静地只返回调用者自己的容器。真机上实测就是 1 条。
+    /// 不设阈值的话，这里会把「只扫到自己」当成成功，后面的慢路径永远走不到。
+    private static let minimumOthers = 3
 
     // MARK: - 枚举
 
     /// 一次性取出所有 App 数据容器。
     /// - Parameter activate: 顺带把每个容器挂到本进程沙箱上（`container_object_sandbox_extension_activate`）。
     ///   挂上之后 open 就不需要再走 Caches 交换那套，代价是每个容器一次内核调用。
-    /// - Returns: 成功时返回条目（可能为空数组）；接口不可用或被拒时返回 nil。
+    /// - Returns: 成功时返回条目（可能为空数组）；接口不可用、被拒、或只放行了自己时返回 nil。
     static func snapshot(activate: Bool = false, limit: Int = maxEntries) -> [Entry]? {
-        guard Symbols.enumerable else { return nil }
+        guard Symbols.enumerable else {
+            record(denial: "缺少 container_query 符号")
+            return nil
+        }
 
         probeLock.lock()
         let denied = enumerationDenied
@@ -139,15 +157,22 @@ enum ContainerIndex {
         setFlags(query, queryFlags)
         Symbols.querySetPart?(query, 0)
 
+        let ownRoot = canonicalize(NSHomeDirectory())
         var entries: [Entry] = []
         entries.reserveCapacity(limit)
-        var activated = 0
+        var skippedSelf = 0
 
         let completed = iterate(query) { object in
             guard let object else { return true }
             guard let rawPath = getPath(object) else { return true }
             let path = canonicalize(String(cString: rawPath))
             guard path.hasPrefix("/private/var/"), path.count > 16 else { return true }
+
+            // 自己的容器不算「其他 App」——它也进不了清理列表（本 App 单独两项）
+            if path == ownRoot {
+                skippedSelf += 1
+                return true
+            }
 
             var identifier: String?
             if let getIdentifier = Symbols.objectIdentifier, let raw = getIdentifier(object) {
@@ -156,21 +181,33 @@ enum ContainerIndex {
             }
 
             if activate, let activateObject = Symbols.objectActivate {
-                if activateObject(object) { activated += 1 }
+                _ = activateObject(object)
             }
 
             entries.append(Entry(identifier: identifier, path: path))
             return entries.count < limit
         }
 
-        // 完全没拿到条目、且迭代没有走完，说明被拒了。记下来，本轮之后不再探测。
-        if entries.isEmpty, !completed {
-            probeLock.lock()
-            enumerationDenied = true
-            probeLock.unlock()
-            return nil
+        if entries.count >= minimumOthers {
+            return entries
         }
-        return entries
+
+        // 拿到的容器少得不像一台正常设备：只能是自己，或者干脆被拒。
+        let reason: String
+        if entries.isEmpty {
+            reason = completed ? "索引为空（沙盒只允许本 App）" : "containermanagerd 拒绝枚举"
+        } else {
+            reason = "索引只给出 \(entries.count + skippedSelf) 个容器（含自己），判定为沙盒限制"
+        }
+        record(denial: reason)
+        return nil
+    }
+
+    private static func record(denial reason: String) {
+        probeLock.lock()
+        enumerationDenied = true
+        lastDenialReason = reason
+        probeLock.unlock()
     }
 
     /// 按 bundleID 查单个容器的路径。比枚举便宜，适合「只想知道某一个 App」。

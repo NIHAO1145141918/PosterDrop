@@ -587,11 +587,38 @@ enum ContainerLocator {
     ///   写探针失败（系统把父目录设成只读）时退回只读，至少扫描还能走快路径。
     @discardableResult
     static func grantApplicationRoot(group: String, requireWrite: Bool = false) -> Bool {
-        if requireWrite,
-           (try? SandboxEscape.grant(path: applicationRoot, group: group, requireWrite: true, pinned: true)) != nil {
-            return true
+        grantApplicationRootDetailed(group: group, requireWrite: requireWrite).ok
+    }
+
+    /// 和 `grantApplicationRoot` 一样，但把失败原因带出来。
+    ///
+    /// 这条路的成败决定了扫描能不能走快路径，失败时如果只说「失败」，
+    /// 就分不清是 containermanagerd 拒绝了 Caches 指向父目录，还是写探针没通过。
+    static func grantApplicationRootDetailed(
+        group: String,
+        requireWrite: Bool = false
+    ) -> (ok: Bool, detail: String) {
+        var reasons: [String] = []
+
+        if requireWrite {
+            do {
+                _ = try SandboxEscape.grant(
+                    path: applicationRoot, group: group, requireWrite: true, pinned: true
+                )
+                return (true, "可写")
+            } catch {
+                reasons.append("可写：\(error.localizedDescription)")
+            }
         }
-        return (try? SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)) != nil
+
+        do {
+            _ = try SandboxEscape.grant(path: applicationRoot, group: group, pinned: true)
+            return (true, requireWrite ? "只读（写探针失败：\(reasons.joined(separator: "；"))）" : "只读")
+        } catch {
+            reasons.append("只读：\(error.localizedDescription)")
+        }
+
+        return (false, reasons.joined(separator: "；"))
     }
 
     private static func scanParentDirectory(group: String, target: String, log: (String) -> Void) -> Hit? {
