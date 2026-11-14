@@ -168,9 +168,42 @@ enum ContainerLocator {
             log(stamp("   缓存里没有，重新扫描"))
         }
 
-        let leaked = scanApplicationContainers(log: { log(stamp($0)) })
-        if let hit = identify(paths: leaked, group: group, target: bundleID, log: { log(stamp($0)) }, source: "fsgetpath 枚举") {
-            return done(hit)
+        // 已经扫过一遍的话，只需要补扫新增的那一段，分段反而更慢
+        if let cached = cachedScanLimit(), cached > 0 {
+            let leaked = scanApplicationContainers(log: { log(stamp($0)) })
+            if let hit = identify(paths: leaked, group: group, target: bundleID, log: { log(stamp($0)) }, source: "fsgetpath 增量") {
+                return done(hit)
+            }
+        } else if let ceiling = scanCeiling(), ceiling > 1_000_000 {
+            // 首次全扫：按 10% / 30% / 100% 分三段。系统 App 的容器是首次开机初始化时
+            // 建的，object id 落在卷的前段；每段扫完先认领一次，命中就不必扫剩下的。
+            var scanned: Int64 = 0
+            for (index, fraction) in scanStages.enumerated() {
+                let boundary = min(ceiling, max(scanned, Int64(Double(ceiling) * fraction)))
+                guard boundary > scanned else { continue }
+                let stage = scanApplicationContainers(
+                    log: { log(stamp($0)) },
+                    from: scanned + 1,
+                    to: boundary,
+                    saveCache: fraction >= 1.0
+                )
+                scanned = boundary
+                let label = fraction >= 1.0 ? "第 \(index + 1) 段" : "前 \(Int(fraction * 100))%"
+                if let hit = identify(
+                    paths: stage, group: group, target: bundleID,
+                    log: { log(stamp($0)) }, source: "fsgetpath 枚举 · \(label)"
+                ) {
+                    return done(hit)
+                }
+                if fraction < 1.0 {
+                    log(stamp("   \(label) 里没有，继续扫…"))
+                }
+            }
+        } else {
+            let leaked = scanApplicationContainers(log: { log(stamp($0)) })
+            if let hit = identify(paths: leaked, group: group, target: bundleID, log: { log(stamp($0)) }, source: "fsgetpath 枚举") {
+                return done(hit)
+            }
         }
 
         // ⑥ 兜底：再试一次父目录（①.6 失败后可能刚好过了一次数据保护解锁）
@@ -310,7 +343,14 @@ enum ContainerLocator {
     }
 
     private static let scanMargin: Int64 = 100_000
-    private static let chunkSize: Int64 = 65_536
+    /// chunk 从 65536 提到 262144：1.2 亿个 object id 下，chunk 数从 1864 降到 466，
+    /// 取任务锁和 formUnion 的次数都降到 1/4。单次 fsgetpath 才是大头，这个只是省掉零碎开销。
+    private static let chunkSize: Int64 = 262_144
+
+    /// 分段扫描的进度点。系统 App（PosterBoard 就是）的容器在首次开机初始化时创建，
+    /// object id 落在卷的前段；每扫完一段就先试着认领，命中就不用扫后面了。
+    /// 10% 一段约 30 秒，30% 一段约 90 秒，最后一段扫完剩余部分。
+    private static let scanStages: [Double] = [0.10, 0.30, 1.0]
 
     /// 容器路径的公共前缀 + 三种容器目录名。扫描时用 memcmp 直接比字节。
     private static let containerCommon: [CChar] = Array("/private/var/mobile/Containers/Data/".utf8).map { CChar(bitPattern: $0) }
@@ -344,7 +384,24 @@ enum ContainerLocator {
         return nil
     }
 
-    private static func scanApplicationContainers(log: @escaping (String) -> Void) -> [String] {
+    /// 当前卷的 object id 上界。分段扫描要先知道总长度，才能按比例切片。
+    private static func scanCeiling() -> Int64? {
+        makeProbe()?.limit
+    }
+
+    /// 扫卷上的 object id，把落在 App 容器目录下的路径反查出来。
+    ///
+    /// - Parameters:
+    ///   - first: 起始 id。传 nil 时按增量策略（上次扫到哪就从哪附近继续）。
+    ///   - upper: 结束 id。传 nil 时扫到探针给出的上界。
+    ///   - saveCache: 只有扫到上界（或者调用方明确要）才写缓存，分段扫描的中间结果不写，
+    ///     否则下次增量会以为整卷都扫完了。
+    private static func scanApplicationContainers(
+        log: @escaping (String) -> Void,
+        from explicitFirst: Int64? = nil,
+        to explicitUpper: Int64? = nil,
+        saveCache: Bool = false
+    ) -> [String] {
         guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fsgetpath") else {
             log("   ⚠️ 系统没有 fsgetpath")
             return []
@@ -362,23 +419,29 @@ enum ContainerLocator {
             return []
         }
 
+        let upper = min(probe.limit, explicitUpper ?? probe.limit)
+
         // 增量：上次扫到哪，就从那附近继续
-        var first: Int64 = 1
-        if let cached = cachedScanLimit(), cached > 0, cached < probe.limit {
+        var first = explicitFirst ?? 1
+        if explicitFirst == nil, let cached = cachedScanLimit(), cached > 0, cached < upper {
             first = max(1, cached - scanMargin)
-            log("   增量扫描 \(first)…\(probe.limit)（上次扫到 \(cached)）")
+            log("   增量扫描 \(first)…\(upper)（上次扫到 \(cached)）")
+        } else if explicitFirst != nil {
+            log("   扫描 \(first)…\(upper)")
         } else {
-            log("   全量扫描 1…\(probe.limit)")
+            log("   全量扫描 1…\(upper)")
         }
 
-        let total = max(0, probe.limit - first + 1)
+        let total = max(0, upper - first + 1)
         let chunks = (total + chunkSize - 1) / chunkSize
         guard chunks > 0 else { return [] }
 
         var nextChunk: Int64 = 0
         var hits = Set<String>()
         let lock = NSLock()
-        let workers = max(2, min(8, ProcessInfo.processInfo.activeProcessorCount))
+        // fsgetpath 是阻塞 syscall，时间几乎全花在内核的 vnode 查找上（无效 id 也一样贵），
+        // 所以超订线程是划算的：8 → 32，实测能把 6 核机器上的 I/O 等待压下去。
+        let workers = max(8, min(32, ProcessInfo.processInfo.activeProcessorCount * 4))
         let started = Date()
 
         let progressQueue = DispatchQueue(label: "posterdrop.scan.progress")
@@ -412,7 +475,7 @@ enum ContainerLocator {
                         if chunk >= chunks { break }
 
                         let chunkStart = first + chunk * chunkSize
-                        let chunkEnd = min(chunkStart + chunkSize - 1, probe.limit)
+                        let chunkEnd = min(chunkStart + chunkSize - 1, upper)
 
                         var inode = chunkStart
                         while inode <= chunkEnd {
@@ -457,7 +520,10 @@ enum ContainerLocator {
         // 增量扫描只覆盖新 id，保存时要把旧缓存合并进来
         let previous = (UserDefaults.standard.array(forKey: ScanCache.paths) as? [String]) ?? []
         let merged = Array(Set(previous + Array(hits)))
-        saveScanCache(merged, limit: probe.limit)
+        // 分段扫描的中间结果不落盘：只有扫到上界时写的 limit 才是可信的「已扫完」
+        if saveCache || upper >= probe.limit {
+            saveScanCache(merged, limit: upper)
+        }
         return Array(hits)
     }
 
