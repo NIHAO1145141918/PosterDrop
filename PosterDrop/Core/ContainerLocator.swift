@@ -184,8 +184,7 @@ enum ContainerLocator {
                 let stage = scanApplicationContainers(
                     log: { log(stamp($0)) },
                     from: scanned + 1,
-                    to: boundary,
-                    saveCache: fraction >= 1.0
+                    to: boundary
                 )
                 scanned = boundary
                 let label = fraction >= 1.0 ? "第 \(index + 1) 段" : "前 \(Int(fraction * 100))%"
@@ -394,13 +393,11 @@ enum ContainerLocator {
     /// - Parameters:
     ///   - first: 起始 id。传 nil 时按增量策略（上次扫到哪就从哪附近继续）。
     ///   - upper: 结束 id。传 nil 时扫到探针给出的上界。
-    ///   - saveCache: 只有扫到上界（或者调用方明确要）才写缓存，分段扫描的中间结果不写，
-    ///     否则下次增量会以为整卷都扫完了。
+    /// 每次调用结束都会把「扫到哪 + 目前找到的容器」写进缓存，分段推进时不会丢结果。
     private static func scanApplicationContainers(
         log: @escaping (String) -> Void,
         from explicitFirst: Int64? = nil,
-        to explicitUpper: Int64? = nil,
-        saveCache: Bool = false
+        to explicitUpper: Int64? = nil
     ) -> [String] {
         guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fsgetpath") else {
             log("   ⚠️ 系统没有 fsgetpath")
@@ -520,10 +517,10 @@ enum ContainerLocator {
         // 增量扫描只覆盖新 id，保存时要把旧缓存合并进来
         let previous = (UserDefaults.standard.array(forKey: ScanCache.paths) as? [String]) ?? []
         let merged = Array(Set(previous + Array(hits)))
-        // 分段扫描的中间结果不落盘：只有扫到上界时写的 limit 才是可信的「已扫完」
-        if saveCache || upper >= probe.limit {
-            saveScanCache(merged, limit: upper)
-        }
+        // 每扫完一段都落盘：limit 记「已经扫到这里」，路径是全量合并。
+        // 分段时只扫了前 10%，如果不写，那 131 个容器就随返回值一起丢了
+        // （清理页只认缓存，不认本次调用的返回值）。
+        saveScanCache(merged, limit: upper)
         return Array(hits)
     }
 
@@ -581,15 +578,49 @@ enum ContainerLocator {
     /// 优先复用 fsgetpath 的扫描缓存（清理不该再花几十秒扫一遍卷）；
     /// 缓存为空时才现场扫，扫完照常写回缓存。
     static func discoverContainers(log: @escaping (String) -> Void) -> [String] {
-        let cached = loadScanCache()
-        if !cached.isEmpty {
+        var cached = loadScanCache()
+
+        // 1.4.8 的分段扫描只推进了 limit、没有保存路径，缓存可能只剩 noteHit 写的一两条。
+        // 这种缓存不能信：limit 已经跑到卷尾，但路径是残的，增量永远补不回来，必须整体重扫。
+        if !cached.isEmpty, cached.count < 20 {
+            log("扫描缓存只剩 \(cached.count) 个容器（旧版本写入的残段），丢弃重扫…")
+            UserDefaults.standard.removeObject(forKey: ScanCache.limit)
+            UserDefaults.standard.removeObject(forKey: ScanCache.paths)
+            cached = []
+        }
+
+        let scanned = cachedScanLimit() ?? 0
+        let ceiling = scanCeiling() ?? 0
+        // 定位成功时只扫到前 10%（命中就停了），那份缓存不能当成「整卷都扫完了」。
+        // 清理要的是全部 App，所以这里按缺多少补多少。
+        let complete = ceiling > 0 && scanned >= ceiling - scanMargin
+        if !cached.isEmpty, complete {
             log("复用上次的扫描结果：\(cached.count) 个容器")
             return cached
         }
-        log("没有扫描缓存，正在反查容器 inode（第一次会慢几秒）…")
-        let fresh = scanApplicationContainers(log: log)
-        log("得到 \(fresh.count) 个容器")
-        return fresh
+
+        if cached.isEmpty {
+            log("没有扫描缓存，正在反查容器 inode…")
+        } else {
+            log("上次只扫到 \(scanned) 这个 id，补扫剩余部分（已有 \(cached.count) 个容器）…")
+        }
+
+        // 补扫也分段推进：每段结束都会写缓存，中途退出不会白扫
+        var all = cached
+        if ceiling > 1_000_000 {
+            var boundaryFrom: Int64 = scanned
+            for fraction in scanStages {
+                let boundary = min(ceiling, max(boundaryFrom, Int64(Double(ceiling) * fraction)))
+                guard boundary > boundaryFrom else { continue }
+                let stage = scanApplicationContainers(log: log, from: boundaryFrom + 1, to: boundary)
+                all = Array(Set(all + stage))
+                boundaryFrom = boundary
+            }
+        } else {
+            all = Array(Set(all + scanApplicationContainers(log: log)))
+        }
+        log("得到 \(all.count) 个容器")
+        return all
     }
 
     private static func noteHit(_ path: String, bundleID: String) {
