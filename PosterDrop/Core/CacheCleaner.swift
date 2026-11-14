@@ -425,12 +425,12 @@ final class CacheCleaner: @unchecked Sendable {
             ? "容器父目录已授权（\(root.detail)）：整轮不再逐个签发扩展"
             : "容器父目录授权失败（\(root.detail)）：改走索引激活 / 逐个签发")
 
-        // 两条通道（part_domain / Caches 交换）都被拒时，逐个签发只会重复失败。
-        // 后面每个 80–120ms，400 个就是 40 秒全失败，不如当场说清楚。
-        if !rootGranted, let code = root.code, code == -6 || code == -8 {
-            log("其他 App：两条签发通道都被拒绝（代码 \(code)），跳过深度扫描")
-            log("   请把这条日志连同系统版本发给开发者。")
-            return []
+        // 父目录授权失败在 27.x 上是常态：官方 worse_query 明确说 27.x 只有 AppGroup
+        // 和 System 能拿父目录扩展，Data/Application 不在其中。但具体容器可以单独签发，
+        // 所以这里不能提前退出——否则等于把「逐个签发」那条唯一可能成功的路关掉。
+        // 代价是每个容器 80–120ms，所以由 deadline 控制，不会无限跑。
+        if !rootGranted, let code = root.code, code == -6 {
+            log("容器父目录 -6 是 27.x 的预期结果，改走逐个签发具体容器")
         }
 
         let posterCanonical = ContainerLocator

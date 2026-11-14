@@ -348,11 +348,17 @@ enum SandboxEscape {
             }
         }
 
+        // 沙盒会把「别的 App 的容器」的 stat 拦成 EPERM，但它确实存在。
+        // fsgetpath 反查出来的路径更是如此：路径本身是可信的，只是没权限看元数据。
+        // 这两种情况要放行——否则 ⑤ 枚举出来的几百个容器会全部卡在 -255，
+        // 一次全盘扫描就白扫了。真正不存在（ENOENT）才报 -255。
         var status = stat()
-        guard lstat(canonical, &status) == 0 else {
+        let statOK = lstat(canonical, &status) == 0
+        if !statOK, errno != EPERM, errno != EACCES {
             throw Failure(code: -255, message: "目标不存在：\(canonical)")
         }
-        let isDirectory = (status.st_mode & S_IFMT) == S_IFDIR
+        // 拿不到元数据时假定是目录：容器根和父目录都是目录，文件的情况由签发结果兜底。
+        let isDirectory = statOK ? (status.st_mode & S_IFMT) == S_IFDIR : true
 
         // iOS 27 先试标准 flags，iOS 26 先试备用 flags；成功的那组会记下来。
         let preferAlt = preferredAltFlags()

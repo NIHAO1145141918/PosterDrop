@@ -116,11 +116,13 @@ enum ContainerLocator {
         }
         if let code = parent.code { kernelCode = code }
 
-        if let code = kernelCode, isFatalGrantCode(code) {
-            log(stamp("❌ 两条签发通道都被拒绝（代码 \(code)），中止后续查找"))
-            log("   part_domain 与 Caches 交换都没过，②③④⑤ 依赖同一条通道，继续跑只会多等几分钟。")
-            log("   请把这一段日志连同系统版本发给开发者。")
-            return nil
+        // 父目录签发失败在 27.x 上是**预期行为**，不能当成「通道死了」。
+        // 官方 worse_query 的注释写得很清楚：27.x 上只有 AppGroup 和 System 能拿父目录扩展，
+        // Data/Application 不在其中；README 列的访问范围也写成 `Data/Application/*`（子项）。
+        // 具体容器是能单独签的，⑤ 的 fsgetpath 枚举就是为这条路准备的——之前在这里
+        // 直接 return，等于把唯一可用的那条路自己关上了。
+        if let code = kernelCode, code == -6 {
+            log(stamp("   父目录扩展被拒（-6）是 27.x 的常态，改走「先枚举具体容器、再逐个签发」"))
         }
 
         log(stamp("② LaunchServices 映射…"))
@@ -245,6 +247,10 @@ enum ContainerLocator {
         var identified = 0
         var checked = 0
         var seen = Set<String>()
+        // 逐个签发时把失败码收集起来。如果整批都失败，这组计数能直接回答
+        // 「是 -6（daemon 拒发 token）还是 -255（沙盒不让 stat）还是 -8（签了打不开）」，
+        // 比只看到「可读标识 0 个」有用得多。
+        var failures: [Int64: Int] = [:]
 
         for path in paths {
             guard seen.insert(path).inserted else { continue }
@@ -256,7 +262,13 @@ enum ContainerLocator {
 
             var identifier = SandboxEscape.containerIdentifier(at: path)
             if identifier == nil {
-                _ = try? SandboxEscape.grant(path: path, group: group)
+                do {
+                    _ = try SandboxEscape.grant(path: path, group: group)
+                } catch let failure as SandboxEscape.Failure {
+                    failures[failure.code, default: 0] += 1
+                } catch {
+                    failures[-9, default: 0] += 1
+                }
                 identifier = SandboxEscape.containerIdentifier(at: path)
             }
 
@@ -277,6 +289,13 @@ enum ContainerLocator {
         }
         let cost = String(format: "%.1f", Date().timeIntervalSince(started))
         log("   可读标识 \(identified) 个，没有 \(target)（用时 \(cost) 秒）")
+        if !failures.isEmpty {
+            let summary = failures
+                .sorted { $0.value > $1.value }
+                .map { "\($0.key)×\($0.value)" }
+                .joined(separator: "，")
+            log("   签发失败分布：\(summary)")
+        }
         return nil
     }
 
@@ -715,12 +734,6 @@ enum ContainerLocator {
             }
         }
         return (nil, nil)
-    }
-
-    /// 这两个码意味着签发通道本身被拒（-6 内核拒绝，-8 签了也打不开）。
-    /// 在它们之后继续枚举和扫描没有意义——全盘扫几分钟也换不来一个能打开的容器。
-    private static func isFatalGrantCode(_ code: Int64) -> Bool {
-        code == -6 || code == -8
     }
 
     // MARK: - LaunchServices
