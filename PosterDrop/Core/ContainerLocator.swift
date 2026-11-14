@@ -591,14 +591,56 @@ enum ContainerLocator {
         rememberedPath(for: bundleID)
     }
 
+    /// csstore 的解析结果。一个进程只读一次 64MB 文件。
+    private static var csstoreResult: LaunchServicesStore.Harvest?
+    private static var csstoreTried = false
+    private static let csstoreLock = NSLock()
+
+    private static func csstoreHarvest(
+        log: @escaping (String) -> Void
+    ) -> LaunchServicesStore.Harvest? {
+        csstoreLock.lock()
+        defer { csstoreLock.unlock() }
+        if csstoreTried { return csstoreResult }
+        csstoreTried = true
+        log("⓪ 试读 LaunchServices csstore（3105 同款快路径）…")
+        let started = Date()
+        let result = LaunchServicesStore.harvest(log: log)
+        if let result {
+            let cost = String(format: "%.2f", Date().timeIntervalSince(started))
+            log("   用时 \(cost) 秒：\(result.identifiers.count) 个 App，\(result.containers.count) 个容器")
+        } else {
+            log("   csstore 读不到（沙盒拦住了 /var/mobile/Library/Caches），回落到 inode 反查")
+        }
+        csstoreResult = result
+        return result
+    }
+
     /// 给清理页用：拿一批已知的容器路径。
-    /// 优先复用 fsgetpath 的扫描缓存（清理不该再花几十秒扫一遍卷）；
-    /// 缓存为空时才现场扫，扫完照常写回缓存。
+    ///
+    /// 顺序：扫描缓存（完整就直接用）→ csstore 快路径 → fsgetpath 分段补扫。
+    /// 前两条都是秒级，只有第三条会花几十秒到几分钟。
     static func discoverContainers(
+        group: String,
         log: @escaping (String) -> Void,
         deadline: Date? = nil
     ) -> [String] {
         var cached = loadScanCache()
+
+        // ⓪ csstore：一次读文件换掉一整轮 inode 扫描。
+        // 3105 拿 App 清单走的就是这条路（LaunchServices 的二进制库里存着全部
+        // bundleID 和 DataContainerURL）。成本 0.3 秒，对比 fsgetpath 的 250 秒。
+        if cached.isEmpty, let harvest = csstoreHarvest(log: log) {
+            if !harvest.containers.isEmpty {
+                // 只存路径、不推进 limit：csstore 是「已安装 App」的快照，
+                // 不等于整卷扫完（可能存在容器但 App 已卸载的残留）。
+                // 标记成扫完会让以后的增量永远补不回剩下的部分。
+                saveScanPaths(harvest.containers)
+                log("csstore 直取 \(harvest.containers.count) 个容器，跳过全卷扫描")
+                return harvest.containers
+            }
+            log("csstore 只有 bundleID 没有容器路径，仍需扫描卷")
+        }
 
         // 1.4.8 的分段扫描只推进了 limit、没有保存路径，缓存可能只剩 noteHit 写的一两条。
         // 这种缓存不能信：limit 已经跑到卷尾，但路径是残的，增量永远补不回来，必须整体重扫。

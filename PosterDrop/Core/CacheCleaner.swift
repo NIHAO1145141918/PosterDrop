@@ -225,6 +225,9 @@ final class CacheCleaner: @unchecked Sendable {
     /// 上一版到点直接跳过，排在后面的容器（UUID 顺序恰好靠后的大 App）全部消失，
     /// 这是「只能清掉几十 MB」最直接的原因。
     private static let scanTimeBudget: TimeInterval = 30
+    /// 逐个签发阶段的独立预算。每个容器 80–120ms，400 个约 40 秒，90 秒足够覆盖
+    /// 并留出降级余量。它必须和 scanTimeBudget 分开算，否则会被发现容器的时间吃光。
+    private static let signTimeBudget: TimeInterval = 90
     /// 降级模式下仍然统计的目录：两项，成本约为完整统计的四分之一。
     private static let degradedEntries: Set<String> = ["Library/Caches", "tmp"]
     /// 深度扫描最多看多少个容器。父目录扩展可用时基本等于全量。
@@ -464,17 +467,33 @@ final class CacheCleaner: @unchecked Sendable {
         // 补扫单独给 90 秒：全卷 1.2 亿个 object id 按 2μs 算要 250 秒，
         // 但前 30% 就覆盖了六成 App。到点先用已扫到的出结果，剩下的下次接着补。
         let discoverDeadline = Date().addingTimeInterval(90)
-        let containers = ContainerLocator.discoverContainers(log: log, deadline: discoverDeadline)
+        let discoverStarted = Date()
+        let containers = ContainerLocator.discoverContainers(
+            group: group, log: log, deadline: discoverDeadline
+        )
+        // 把「找容器」和「进容器」的耗时分开打。两件事的成本差十倍，
+        // 混在一行日志里会让人以为整轮都慢，实际慢的通常只是前者。
+        log(String(
+            format: "发现容器用时 %.1f 秒（%d 个）",
+            Date().timeIntervalSince(discoverStarted),
+            containers.count
+        ))
         guard !containers.isEmpty else {
             log("没有发现其他 App 的容器，跳过")
             return []
         }
+        // 逐个签发的预算必须重新起算。
+        // 原来这里复用函数开头那个 30 秒的 `deadline`，而 discoverContainers
+        // 最多能花 90 秒——等它回来，deadline 早已过期，scanContainersSlow 里
+        // 每一批都会判定成 late，全部降级成只统计 Caches + tmp，
+        // Library/Application Support 里的离线数据、缓存库会被整片漏掉。
+        let signDeadline = Date().addingTimeInterval(Self.signTimeBudget)
         return scanContainersSlow(
             group: group,
             containers: containers,
             poster: posterCanonical,
             started: started,
-            deadline: deadline,
+            deadline: signDeadline,
             log: log
         )
     }
