@@ -75,9 +75,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      # 构建脚本产出的固定叫 PosterDrop.ipa（工程名），但对外统一用 JingJie。
+      # 在 attach 前复制一份换名，避免 Release 页面上出现两个同内容的资产。
+      - name: Stage release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cp build/PosterDrop.ipa "build/JingJie-${GITHUB_REF_NAME#v}-unsigned.ipa"
+
       - name: Attach IPA to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/PosterDrop.ipa
+          files: build/JingJie-*-unsigned.ipa
           fail_on_unmatched_files: true
