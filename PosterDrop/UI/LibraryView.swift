@@ -158,7 +158,7 @@ struct LibraryView: View {
                 Image(systemName: "bolt.horizontal.circle.fill")
                     .font(.caption)
                     .foregroundColor(Theme.accent)
-                Text("worse_query 直连 · 无需配对、无需 VPN")
+                Text("worse_query 直连 · 全程本机完成")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -229,7 +229,7 @@ struct LibraryView: View {
                 .font(.subheadline.weight(.semibold))
 
             stepRow(index: 1, title: "签名带上 App Group", detail: "重签时勾选一个 App Groups（免费 Personal Team 也能签）。整个底层就靠这个 group 换沙箱扩展。")
-            stepRow(index: 2, title: "导入壁纸包", detail: "选 .tendies / .zip 或整个文件夹；不需要 VPN，也不需要配对文件。")
+            stepRow(index: 2, title: "导入壁纸包", detail: "选 .tendies / .zip 或整个文件夹即可。")
             stepRow(index: 3, title: "应用并 respring", detail: "选中壁纸 → 应用所选 → 自动重启桌面，随后在锁屏墙纸里选用。")
         }
         .card()

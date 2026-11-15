@@ -7,11 +7,10 @@ import ObjectiveC
 ///
 /// 这条路的性质和「签发父目录再枚举」完全不同：`dataContainerURL` 是
 /// `LSApplicationProxy` 上的一个普通属性，取值只是一次 ObjC 消息，
-/// 不需要签发、不需要遍历、不需要配对。
+/// 不需要签发，也不需要遍历容器。
 ///
 /// 3105 用它给 App 列表配图标（`AppIconHelper.m` 里的 `dataContainerURL` /
-/// `containerURL` 双取），AirCard 用的是配对后 installation_proxy 的 `Container`
-/// 字段——后者要 LocalDevVPN 和配对文件，前者在沙箱里就能问。
+/// `containerURL` 双取）。后者要求宿主权限，前者在沙箱里就能问。
 ///
 /// 系统在某些版本会把这个字段裁掉（返回 nil）。那时整条查询只有几微秒，
 /// 调用方直接落到下一条路，不需要额外判断。

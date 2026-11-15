@@ -47,10 +47,6 @@ enum DeviceLabel {
         UIDevice.current.userInterfaceIdiom == .pad
     }
 
-    /// 配对入口的图标，iPad 上不用 iPhone 造型。
-    static var pairingSymbol: String {
-        isPad ? "ipad.and.arrow.forward" : "iphone.and.arrow.forward"
-    }
 }
 
 // MARK: - 卡片

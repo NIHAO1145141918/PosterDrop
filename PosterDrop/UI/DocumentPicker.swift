@@ -15,8 +15,8 @@
 //
 //  关于 asCopy：**不能用 false**。open-in-place 模式下，App 没有在
 //  CFBundleDocumentTypes 里声明过的类型会被整片置灰——`.plist` 正好命中这个坑，
-//  表现就是「文件看得见、点不动」。导入副本没有这个限制，而且配对文件只有几百
-//  字节，复制开销可以忽略。
+//  表现就是「文件看得见、点不动」。导入副本没有这个限制，壁纸包通常只有几 MB，
+//  复制的开销远小于一次失败的导入。
 //
 
 import SwiftUI
@@ -25,10 +25,10 @@ import UniformTypeIdentifiers
 
 struct DocumentPicker: UIViewControllerRepresentable {
 
-    /// 配对文件一次只要一个，壁纸可以多选。
+    /// 一次只导入一个文件时可以关掉多选，壁纸包则通常要多选。
     var allowsMultipleSelection: Bool = true
-    /// 是否允许选文件夹。配对文件用不到，而 `.folder` 会让选择器进入
-    /// 文件夹浏览模式，iOS 27 上首屏要多等几秒才显示列表。
+    /// 是否允许选文件夹。`.folder` 会让选择器进入文件夹浏览模式，
+    /// iOS 27 上首屏要多等几秒才显示列表。
     var allowsFolders: Bool = false
     /// 是否把选中文件复制到临时目录。
     ///

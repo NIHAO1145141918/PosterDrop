@@ -44,7 +44,7 @@ final class PosterBoardInstaller {
 
     // MARK: - 容器
 
-    /// 走 worse_query 定位容器（不需要配对、不需要 VPN）。
+    /// 走 worse_query 定位容器。
     func detectContainer(group: String, manual: String?, log: @escaping (String) -> Void) async throws -> String {
         return try await runOffMain {
             guard let hit = ContainerLocator.findPosterBoard(group: group, manual: manual, log: log) else {

@@ -7,7 +7,7 @@
 //  能用的入口只有三类：
 //    ① 手动填写的路径（用户从 WQFiles 抄来）——最可靠，先验证；
 //    ② LaunchServices / containermanagerd 自己的映射（对系统 App 常常为空，但很便宜）；
-//    ③ fsgetpath 把 inode 反查成路径——不需要 VPN、不需要列目录权限，
+//    ③ fsgetpath 把 inode 反查成路径——不需要列目录权限，
 //       代价是要扫一遍卷上的 object id（多线程，几秒），结果会缓存到下次。
 //
 //  /var/mobile/Containers/Data/Application 这个父目录本身列不出来（WQFiles 的注释也确认了：
@@ -95,30 +95,6 @@ enum ContainerLocator {
         // 签发通道被内核拒绝时记下错误码。-6 表示 worse_query 已被系统修补，
         // 后面所有路径都依赖同一条通道，继续跑只会让人等——尤其是 ⑤ 的全盘扫描。
         var kernelCode: Int64?
-
-        // ⓪.6 远程索引：RSD + installation_proxy，一次 Browse 换全部 App 的容器路径。
-        // 需要用户导入配对文件；没有就整段跳过，对下面的通道零影响。
-        // 这是唯一能和 3105 正面比的路径——1 秒 vs 250 秒，差的是权限不是算法。
-        if PairingStore.shared.hasPairing {
-            if RemoteContainerIndex.shared.container(for: bundleID) == nil {
-                _ = RemoteContainerIndex.shared.snapshot(log: { log(stamp($0)) })
-            }
-            if let remote = RemoteContainerIndex.shared.container(for: bundleID) {
-                log(stamp("⓪.6 远程索引直取：\(remote)"))
-                let check = verifyDetailed(
-                    path: remote, group: group, target: bundleID, log: { log(stamp($0)) }
-                )
-                if check.ok {
-                    noteHit(remote, bundleID: bundleID)
-                    return done(Hit(
-                        path: SandboxEscape.canonicalPath(remote),
-                        source: "远程索引"
-                    ))
-                }
-                if let code = check.code { kernelCode = code }
-                log(stamp("   远程索引给了路径但进不去，继续按原顺序查找"))
-            }
-        }
 
         // ①.5 LaunchServices 直取：一次 ObjC 消息换一个路径，不需要签发也不需要枚举。
         // 系统裁剪 dataContainerURL 时返回 nil，代价只有几微秒；命中时后面几条路全部跳过。
@@ -736,20 +712,6 @@ enum ContainerLocator {
         if !cached.isEmpty, complete {
             log("复用上次的扫描结果：\(cached.count) 个容器")
             return cached
-        }
-
-        // ⓪.5 远程索引：配对文件 + RSD，一次 Browse 拿全量。
-        // 比 csstore 更可靠（不依赖读 /var/mobile 的权限），比 fsgetpath 快两个数量级。
-        if PairingStore.shared.hasPairing {
-            let remote = RemoteContainerIndex.shared.snapshot(log: log)
-            if !remote.isEmpty {
-                let merged = Array(Set(cached + remote))
-                // 只存路径、不推进 limit：远程索引给的是「已安装 App」的快照，
-                // 不像整卷扫描那样有明确的 inode 上界，推进 limit 会让增量逻辑失真。
-                saveScanPaths(merged)
-                log("远程索引直取 \(remote.count) 个容器，合并后 \(merged.count) 个")
-                return merged
-            }
         }
 
         // ⓪ csstore：一次读文件换掉一整轮 inode 扫描。

@@ -229,6 +229,9 @@ final class CacheCleaner: @unchecked Sendable {
     /// 并留出降级余量。它必须和 scanTimeBudget 分开算，否则会被发现容器的时间吃光。
     private static let signTimeBudget: TimeInterval = 90
     /// 降级模式下仍然统计的目录：两项，成本约为完整统计的四分之一。
+    /// 推断不出 bundle id 时的标题。列表里用短 UUID 作副标题区分。
+    static let unknownAppTitle = "未识别的 App"
+
     private static let degradedEntries: Set<String> = ["Library/Caches", "tmp"]
     /// 深度扫描最多看多少个容器。父目录扩展可用时基本等于全量。
     private static let otherScanLimit = 600
@@ -308,7 +311,12 @@ final class CacheCleaner: @unchecked Sendable {
 
         var measured = measuredApp
         if includeOthers, let group {
-            measured.append(contentsOf: scanOtherApps(group: group, deadline: deadline, log: log))
+            let others = scanOtherApps(group: group, deadline: deadline, log: log)
+            let named = others.filter { $0.title != Self.unknownAppTitle }.count
+            if !others.isEmpty {
+                log("App 名识别：\(named)/\(others.count) 个容器认出了名字，其余显示短 ID")
+            }
+            measured.append(contentsOf: others)
         }
 
         // 系统级三项：不需要容器，路径固定
@@ -816,16 +824,30 @@ final class CacheCleaner: @unchecked Sendable {
         }
         guard tally.bytes > 0 || tally.files > 0 else { return nil }
 
-        // 优先用索引里的 bundleID；索引不可用时退回容器自己的 xattr，最后才是 UUID
-        let xattrIdentifier = FileTree.xattr(containerFD, "com.apple.containermanager.identifier")
-        let resolved = identifier ?? ((xattrIdentifier?.isEmpty == false) ? xattrIdentifier : nil)
-        let title = resolved ?? (path as NSString).lastPathComponent
+        // 标题要的是「微信」这种名字，不是 UUID。
+        //
+        // 索引可用时直接给 bundle id；索引不可用（自签 App 的常态）就从容器
+        // 内部反推：xattr → 容器元数据 → 偏好设置文件名 → 缓存子目录 → 快照目录。
+        // 全部落空才退回短 UUID，仍然保留可区分性。
+        let containerName = (path as NSString).lastPathComponent
+        let bundleID = identifier
+            ?? AppNames.bundleID(containerFD: containerFD, containerName: containerName)
+
+        let title: String
+        let subtitle: String?
+        if let name = AppNames.display(bundleID: bundleID) {
+            title = name
+            subtitle = AppNames.subtitle(bundleID: bundleID)
+        } else {
+            title = Self.unknownAppTitle
+            subtitle = String(containerName.prefix(8))
+        }
 
         return CacheTarget(
             id: "other." + path,
             scope: .other,
             title: title,
-            subtitle: resolved == nil ? (path as NSString).lastPathComponent : nil,
+            subtitle: subtitle,
             detail: "\(picked.count) 项：" + picked.map(shortLabel).joined(separator: "、"),
             paths: picked.map { path + "/" + $0 },
             prefixFilter: nil,

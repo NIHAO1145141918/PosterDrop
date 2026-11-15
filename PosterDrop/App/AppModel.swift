@@ -4,7 +4,7 @@
 //
 //  全局状态与业务编排：导入 → 解析 → 注入 → 刷新 → respring。
 //
-//  这一版只有一条底层：worse_query 的 App Group 沙箱扩展。没有配对、没有隧道、没有 VPN。
+//  只有一条底层：worse_query 的 App Group 沙箱扩展。
 //
 
 import Foundation
@@ -240,7 +240,7 @@ final class AppModel: ObservableObject {
     func handleIncoming(url: URL) {
         let fileExtension = url.pathExtension.lowercased()
         if ["mobiledevicepairing", "mobilepair"].contains(fileExtension) {
-            banner = .info("这一版不再需要配对文件：壁纸直接通过 worse_query 沙箱扩展写入。")
+            banner = .info("壁纸直接通过 worse_query 沙箱扩展写入，无需额外配置。")
             return
         }
         Task {
@@ -268,13 +268,8 @@ final class AppModel: ObservableObject {
         lastReport = nil
         LogBus.shared.clear()
         LogBus.shared.append("==== PosterDrop 开始注入 ====")
-        LogBus.shared.append("底层：worse_query 沙箱扩展（无需配对 / 无需 VPN）")
+        LogBus.shared.append("底层：worse_query 沙箱扩展")
         let startedAt = Date()
-        // 状态检测放到后台，不挡注入；当前通道不走 VPN，只把真实情况写进日志
-        Task.detached(priority: .utility) {
-            let report = VPNStatus.cached()
-            LogBus.shared.append("· VPN 检测：\(report.logLine)")
-        }
 
         do {
             busyLabel = "正在定位 PosterBoard 容器…"
