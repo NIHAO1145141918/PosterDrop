@@ -408,9 +408,33 @@ enum LaunchServicesStore {
               !token.hasPrefix("-"), !token.hasSuffix("-"),
               !token.hasPrefix("group."), !token.hasPrefix("systemgroup."),
               isValidBundleIdentifier(token),
+              hasKnownTLD(token),
               token.split(separator: ".").count <= 6 else { return nil }
         return token
     }
+
+    /// 首段必须是常见顶级域。
+    ///
+    /// 回溯可能停在字符串中间（长度字节恰好也是标识符字节时），
+    /// 于是 `com.tencent.xin` 会被切成 `encent.xin` —— 它「看起来」完全合法。
+    /// 卡住首段可以挡掉这一类断头名字，代价只是漏配几条。
+    private static func hasKnownTLD(_ token: String) -> Bool {
+        guard let head = token.split(separator: ".", maxSplits: 1).first else { return false }
+        return knownTLDs.contains(head.lowercased())
+    }
+
+    private static let knownTLDs: Set<String> = [
+        "com", "org", "net", "io", "me", "co", "cn", "app", "dev", "xyz",
+        "tv", "info", "us", "uk", "jp", "kr", "de", "fr", "ru", "in", "sg",
+        "hk", "tw", "ai", "gg", "to", "fm", "sh", "so", "ly", "cc", "name",
+        "biz", "mobi", "edu", "gov", "cloud", "site", "top", "vip", "pro",
+        "link", "tech", "studio", "page", "blog", "store", "online", "live",
+        "fun", "ltd", "group", "work", "space", "website", "host", "press",
+        "chat", "games", "team", "plus", "art", "design", "codes", "media",
+        "world", "life", "today", "center", "company", "systems", "network",
+        "digital", "global", "solutions", "services", "support", "tools",
+        "zone", "one", "moe", "run", "email", "agency", "wiki", "social"
+    ]
 
     @inline(__always)
     private static func isPathByte(_ byte: UInt8) -> Bool {
