@@ -12,8 +12,10 @@
 //    1. xattr com.apple.containermanager.identifier   —— 一条 syscall，最准
 //    2. .com.apple.mobile_container_manager.metadata.plist 的 MCMMetadataIdentifier
 //    3. Library/Preferences/<bundleID>.plist          —— 存过一次 NSUserDefaults 就有
-//    4. Library/Caches/<bundleID>                     —— 反向域名的子目录
-//    5. Library/SplashBoard/Snapshots/<bundleID>-…    —— 快照目录带 bundle id 前缀
+//    4. Library/Saved Application State/<bundleID>.savedState
+//    5. Library/Cookies/<bundleID>.binarycookies
+//    6. Library/Caches/<bundleID>                     —— 反向域名的子目录
+//    7. Library/SplashBoard/Snapshots/<bundleID>-…    —— 快照目录带 bundle id 前缀
 //
 //  拿到 bundle id 之后再去表里换成「微信」「小红书」这种名字。表是内置的，
 //  因为读取别的 App 的 Info.plist 需要 LaunchServices 权限。表里没有的
@@ -58,13 +60,34 @@ enum AppNames {
             return hit
         }
 
-        // ④ 缓存子目录。`Library/Caches/com.tencent.xin` 这种很常见。
+        // ④ 窗口状态存档：`Library/Saved Application State/com.xingin.xhs.savedState`。
+        //    这目录只有 App 真的被系统挂起过才存在，但在常用 App 上比偏好设置还全。
+        if let hit = firstBundleID(
+            in: containerFD,
+            relative: "Library/Saved Application State",
+            suffixes: [".savedState"]
+        ) {
+            remember(container: containerName, bundleID: hit)
+            return hit
+        }
+
+        // ⑤ Cookie 文件：`Library/Cookies/com.tencent.xin.binarycookies`。
+        if let hit = firstBundleID(
+            in: containerFD,
+            relative: "Library/Cookies",
+            suffixes: [".binarycookies"]
+        ) {
+            remember(container: containerName, bundleID: hit)
+            return hit
+        }
+
+        // ⑥ 缓存子目录。`Library/Caches/com.tencent.xin` 这种很常见。
         if let hit = firstBundleID(in: containerFD, relative: "Library/Caches", suffixes: []) {
             remember(container: containerName, bundleID: hit)
             return hit
         }
 
-        // ⑤ 快照目录，名字形如 `com.xingin.xhs-<UUID>`。
+        // ⑦ 快照目录，名字形如 `com.xingin.xhs-<UUID>`。
         if let hit = snapshotBundleID(containerFD) {
             remember(container: containerName, bundleID: hit)
             return hit
