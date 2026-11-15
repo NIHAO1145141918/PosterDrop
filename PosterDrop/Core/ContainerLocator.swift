@@ -609,7 +609,21 @@ enum ContainerLocator {
         csstoreTried = true
         csstoreResult = harvest
         csstoreLock.unlock()
-        log("   csstore：\(harvest.identifiers.count) 个 App，\(harvest.containers.count) 个容器")
+        log("   csstore：\(harvest.identifiers.count) 个 App，\(harvest.containers.count) 个容器"
+            + (harvest.pairs.isEmpty ? "" : "，\(harvest.pairs.count) 个带名字"))
+    }
+
+    /// 给清理页用：csstore 里这个容器属于哪个 App。
+    ///
+    /// 只在「容器内部反推不出来」时才被问到——那时标题本来是个短 UUID，
+    /// 用 csstore 的记录换成 bundle id 只会更好，不存在「本来对、被改错」的情况。
+    static func csstoreBundleID(forContainerPath path: String) -> String? {
+        let name = (path as NSString).lastPathComponent
+        guard UUID(uuidString: name) != nil else { return nil }
+        csstoreLock.lock()
+        let harvest = csstoreResult
+        csstoreLock.unlock()
+        return harvest?.pairs[name]
     }
 
     /// 定位成功后顺手预热 csstore。

@@ -837,6 +837,7 @@ final class CacheCleaner: @unchecked Sendable {
         let containerName = (path as NSString).lastPathComponent
         let bundleID = identifier
             ?? AppNames.bundleID(containerFD: containerFD, containerName: containerName)
+            ?? ContainerLocator.csstoreBundleID(forContainerPath: path)
 
         let title: String
         let subtitle: String?

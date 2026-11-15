@@ -57,6 +57,20 @@ enum AppNames {
         case unreadable(Int32)
     }
 
+    /// 把 errno 说成人话。
+    ///
+    /// 原来直接打数字，`拒2` 看着像「权限被拒」，其实 2 是 ENOENT——目录压根没建过，
+    /// 和「沙箱不让读」是两个完全不同的修法。日志要能直接指向原因，不能让人再查表。
+    private static func describe(_ code: Int32) -> String {
+        switch code {
+        case 0: return "空"
+        case ENOENT: return "无"          // 目录不存在（App 没建过这一级）
+        case EACCES, EPERM: return "拒"   // 沙箱拒绝
+        case ENOTDIR: return "非目录"
+        default: return "错\(code)"
+        }
+    }
+
     /// 从容器根目录的 fd 猜 bundle id。取不到返回 nil。
     ///
     /// 全部用 containerFD 做起点，不拼全路径：既省一次前缀解析，
@@ -71,20 +85,33 @@ enum AppNames {
             return value
         }
 
-        // ② 容器管理器写在根目录的元数据。正常是 0600 root，读得到算意外之喜。
-        if let data = readSmallFile(containerFD, ".com.apple.mobile_container_manager.metadata.plist"),
-           let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-           let dictionary = plist as? [String: Any] {
-            for key in ["MCMMetadataIdentifier", "MCMMetadataBundleIdentifier"] {
-                if let value = dictionary[key] as? String, looksLikeBundleID(value) {
-                    remember(container: containerName, bundleID: value)
-                    return value
+        // ② 容器管理器写在根目录的元数据。正常是 0644，读得到就是一条铁证。
+        var metaNote = "缺"
+        var metaError: Int32 = 0
+        if let data = readSmallFile(
+            containerFD,
+            ".com.apple.mobile_container_manager.metadata.plist",
+            error: &metaError
+        ) {
+            if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+               let dictionary = plist as? [String: Any] {
+                for key in ["MCMMetadataIdentifier", "MCMMetadataBundleIdentifier"] {
+                    if let value = dictionary[key] as? String, looksLikeBundleID(value) {
+                        remember(container: containerName, bundleID: value)
+                        return value
+                    }
                 }
+                // 文件读到了却没有这两个键：多半是 group / 系统容器，键名不同。
+                metaNote = "无键(\(dictionary.keys.sorted().prefix(3).joined("/")))"
+            } else {
+                metaNote = "解析失败(\(data.count)B)"
             }
+        } else {
+            metaNote = describe(metaError)
         }
 
         // ③ 逐级查目录。失败原因攒起来，识别不出来时留给诊断页。
-        var trace: [String] = []
+        var trace: [String] = ["meta=\(metaNote)"]
         for source in Source.all {
             switch lookup(source, in: containerFD) {
             case .hit(let identifier):
@@ -93,12 +120,49 @@ enum AppNames {
             case .empty:
                 trace.append("\(source.tag)=空")
             case .unreadable(let code):
-                trace.append("\(source.tag)=拒\(code)")
+                trace.append("\(source.tag)=\(describe(code))")
             }
         }
 
+        // 还是认不出来，就把容器里实际有什么打出来。
+        // 上一版只知道「空的」，看不出这些容器到底是「没用过的新容器」还是
+        // 「结构完全不同的扩展容器」，只能瞎猜着补数据源。这里一次列清楚。
+        if let root = briefNames(containerFD, nil) { trace.append("根[\(root)]") }
+        if let library = briefNames(containerFD, "Library") { trace.append("库[\(library)]") }
+
         noteFailure(containerName, trace: trace)
         return nil
+    }
+
+    /// 列一个目录的前几个条目名，用于诊断。打不开返回 nil。
+    private static func briefNames(_ parent: Int32, _ relative: String?, limit: Int = 6) -> String? {
+        let fd: Int32
+        if let relative {
+            fd = relative.withCString {
+                openat(parent, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            }
+        } else {
+            fd = parent
+        }
+        guard fd >= 0 else { return nil }
+        let owned = relative != nil
+        defer { if owned { close(fd) } }
+
+        let iterator = dup(fd)
+        guard iterator >= 0, let directory = fdopendir(iterator) else {
+            if iterator >= 0 { close(iterator) }
+            return nil
+        }
+        defer { closedir(directory) }
+
+        var names: [String] = []
+        while let entry = readdir(directory), names.count < limit {
+            let name = FileTree.entryName(entry)
+            if name == "." || name == ".." { continue }
+            names.append(name)
+        }
+        guard !names.isEmpty else { return "空" }
+        return names.joined(separator: ",")
     }
 
     // MARK: - 单级查找
@@ -201,7 +265,9 @@ enum AppNames {
 
     // MARK: - 持久化
 
-    private static let defaultsKey = "container.bundleIDs"
+    /// 换 key 是为了让 1.1.1 那批可能记错的映射失效重算。
+    /// 旧版本把 `com.apple.*` 判成「未识别」，算出来的短 ID 会一直粘在容器上。
+    private static let defaultsKey = "container.bundleIDs.v2"
     private static let lock = NSLock()
     private static var cache: [String: String] = readCache()
 
@@ -262,12 +328,16 @@ enum AppNames {
     private static func readSmallFile(
         _ parent: Int32,
         _ relative: String,
+        error: inout Int32,
         limit: Int = 32_768
     ) -> Data? {
         let fd = relative.withCString {
             openat(parent, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
         }
-        guard fd >= 0 else { return nil }
+        guard fd >= 0 else {
+            error = errno
+            return nil
+        }
         defer { close(fd) }
 
         var data = Data()

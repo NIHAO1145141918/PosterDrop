@@ -19,6 +19,12 @@ enum LaunchServicesStore {
         let identifiers: [String]
         /// `Data/Application/<UUID>` 形式的容器路径
         let containers: [String]
+        /// 容器 UUID → bundleID。
+        ///
+        /// csstore 没有公开格式，这是从字符串表的排布里读出来的：同一个 App 的
+        /// 记录里，bundleID 紧跟在自己的容器路径前面，中间只隔一个长度字节。
+        /// 拿不到配对时为空字典，调用方回落到容器内部反推。
+        var pairs: [String: String] = [:]
         /// 命中的 csstore 文件路径，只用于日志
         let source: String
     }
@@ -80,6 +86,7 @@ enum LaunchServicesStore {
         return Harvest(
             identifiers: result.identifiers,
             containers: result.containers,
+            pairs: result.pairs,
             source: path
         )
     }
@@ -272,11 +279,13 @@ enum LaunchServicesStore {
     private static func extract(
         from data: Data,
         log: (String) -> Void
-    ) -> (identifiers: [String], containers: [String]) {
+    ) -> (identifiers: [String], containers: [String], pairs: [String: String]) {
         var identifiers: [String] = []
         var containers: [String] = []
         var seenIdentifiers = Set<String>()
         var seenContainers = Set<String>()
+        var pairs: [String: String] = [:]
+        var conflicted = Set<String>()
 
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
@@ -326,6 +335,23 @@ enum LaunchServicesStore {
                         if seenContainers.insert(candidate).inserted {
                             containers.append("/private/var/mobile/Containers/Data/Application/\(candidate)")
                         }
+                        // 顺手把「这个 UUID 属于哪个 App」配出来。
+                        // 路径字符串本身以 `/private/var/mobile/Containers/...` 开头，
+                        // 直接往回读只会读到 `Containers`，所以要先退到字符串起点。
+                        if !conflicted.contains(candidate) {
+                            let urlStart = stringStart(base, cursor, count)
+                            if let token = identifierBefore(base, urlStart) {
+                                if let existing = pairs[candidate] {
+                                    // 同一个 UUID 配出两个名字，说明推断不可信，整条丢掉。
+                                    if existing != token {
+                                        pairs.removeValue(forKey: candidate)
+                                        conflicted.insert(candidate)
+                                    }
+                                } else {
+                                    pairs[candidate] = token
+                                }
+                            }
+                        }
                         cursor = uuidStart + uuidLength
                     } else {
                         cursor += 1
@@ -334,8 +360,61 @@ enum LaunchServicesStore {
             }
         }
 
-        log("   csstore 解析：\(identifiers.count) 个 bundleID，\(containers.count) 个容器路径")
-        return (identifiers, containers)
+        log("   csstore 解析：\(identifiers.count) 个 bundleID，\(containers.count) 个容器路径，\(pairs.count) 个容器配对到名字")
+        return (identifiers, containers, pairs)
+    }
+
+    /// 路径字符串的起点。往回退到第一个不属于路径的字节（长度前缀或另一个字符串）。
+    private static func stringStart(_ base: UnsafePointer<UInt8>, _ offset: Int, _ count: Int) -> Int {
+        var index = offset
+        var steps = 0
+        while index > 0, isPathByte(base[index - 1]) {
+            index -= 1
+            steps += 1
+            // 单条路径不会超过 512 字节；超了说明回溯已经跑偏，直接放弃。
+            if steps > 512 { return offset }
+        }
+        return index
+    }
+
+    /// 取 `end` 之前最近的一个 bundle id 样式的字符串。
+    ///
+    /// 跳过 24 个字节的分隔（长度前缀、对齐用的零字节），再往回收到非标识符字节为止。
+    /// 任何一条校验不过就返回 nil —— 宁可不出配对，也不能把一个错的 App 名贴到容器上。
+    private static func identifierBefore(_ base: UnsafePointer<UInt8>, _ end: Int) -> String? {
+        guard end > 0 else { return nil }
+        var index = end
+        var skipped = 0
+        while index > 0, !isIdentifierByte(base[index - 1]) {
+            index -= 1
+            skipped += 1
+            if skipped > 24 { return nil }
+        }
+        guard index > 0 else { return nil }
+
+        var start = index
+        while start > 0, isIdentifierByte(base[start - 1]), index - start < 156 {
+            start -= 1
+        }
+        let length = index - start
+        guard length >= 6, length <= 155 else { return nil }
+
+        let token = String(
+            decoding: UnsafeBufferPointer(start: base + start, count: length),
+            as: UTF8.self
+        )
+        guard token.contains("."), !token.contains(".."),
+              !token.hasPrefix("."), !token.hasSuffix("."),
+              !token.hasPrefix("-"), !token.hasSuffix("-"),
+              !token.hasPrefix("group."), !token.hasPrefix("systemgroup."),
+              isValidBundleIdentifier(token),
+              token.split(separator: ".").count <= 6 else { return nil }
+        return token
+    }
+
+    @inline(__always)
+    private static func isPathByte(_ byte: UInt8) -> Bool {
+        byte == 47 || isIdentifierByte(byte)      // '/'
     }
 
     private static func isIdentifierByte(_ byte: UInt8) -> Bool {
