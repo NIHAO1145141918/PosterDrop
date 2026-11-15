@@ -9,9 +9,14 @@
 //  文件整片置灰——连 .ipa 都点不了，自然没有任何回调，日志里也就没有“开始导入”。
 //
 //  这里改成：
-//  - 内容类型只用 public.data + public.folder（真正能覆盖所有普通文件/文件夹）；
+//  - 内容类型用 public.data 打底，再并上 property-list / xml 两个明确的类型；
 //  - asCopy: true，选择后系统直接把副本放进临时目录，不需要再处理安全作用域；
 //  - 保留多选；取消不报错。
+//
+//  关于 asCopy：**不能用 false**。open-in-place 模式下，App 没有在
+//  CFBundleDocumentTypes 里声明过的类型会被整片置灰——`.plist` 正好命中这个坑，
+//  表现就是「文件看得见、点不动」。导入副本没有这个限制，而且配对文件只有几百
+//  字节，复制开销可以忽略。
 //
 
 import SwiftUI
@@ -27,9 +32,8 @@ struct DocumentPicker: UIViewControllerRepresentable {
     var allowsFolders: Bool = false
     /// 是否把选中文件复制到临时目录。
     ///
-    /// 配对文件走 false：iCloud /「文件」里的条目在 asCopy 模式下要先整份下载，
-    /// 大文件和弱网时就是几秒白屏。`PairingStore.adopt` 自己会开安全作用域，
-    /// 不需要系统代劳复制。
+    /// 保持 true。false（open-in-place）会让没有在 App 里声明过的类型变灰，
+    /// `.plist` 就是其中之一——用户看到的就是「点不动文件」。
     var copiesFiles: Bool = true
     var onPick: ([URL]) -> Void
     var onCancel: () -> Void = {}
@@ -37,7 +41,10 @@ struct DocumentPicker: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         // public.data 覆盖所有普通文件；不要用 .item——抽象根类型在文件选择器里
         // 会被当成空过滤器，连 .ipa 都点不了。
-        var types: [UTType] = [.data]
+        // propertyList / xml 是给 `.plist` 兜底的：某些系统版本里它的 UTI 解析成
+        // com.apple.property-list 后不再被当成 public.data 的直接子类型，
+        // 只写 .data 会让文件变灰。多列两个显式类型不会放宽到不该选的东西。
+        var types: [UTType] = [.data, .propertyList, .xml]
         if allowsFolders { types.append(.folder) }
 
         let picker = UIDocumentPickerViewController(

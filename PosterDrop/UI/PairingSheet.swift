@@ -59,7 +59,7 @@ struct PairingSheet: View {
                 DocumentPicker(
                     allowsMultipleSelection: false,
                     allowsFolders: false,
-                    copiesFiles: false
+                    copiesFiles: true
                 ) { urls in
                     showingPicker = false
                     guard let url = urls.first else { return }
@@ -68,6 +68,10 @@ struct PairingSheet: View {
                     showingPicker = false
                 }
                 .ignoresSafeArea()
+            }
+            .onChange(of: showingPicker) { _, showing in
+                // 选择器里可能刚把文件拷进/移出文件夹，关掉时重扫一遍。
+                if !showing { refreshState() }
             }
             .onAppear { refreshState() }
         }
@@ -192,6 +196,16 @@ struct PairingSheet: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(busy)
+
+            // 选择器把 `.plist` 置灰时（iOS 对未声明的类型会这么做），
+            // 这条是唯一不折腾的路：把文件挪进 App 自己的文件夹，页面直接列出来。
+            if localFiles.isEmpty {
+                Text("如果系统选择器里 `.plist` 点不动：在「文件」App 里长按它 → 移动 →「我的 iPhone / iPad」→ PosterDrop，再回到本页，文件会出现在上方。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             Button {
                 runProbe()
