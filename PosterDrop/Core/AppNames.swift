@@ -85,17 +85,23 @@ enum AppNames {
             return value
         }
 
-        // ② 容器管理器写在根目录的元数据。正常是 0644，读得到就是一条铁证。
+        // ② 容器管理器写在根目录的元数据。
+        //
+        // iOS 27 的容器根目录里有两份同名文件（诊断日志里能看到）：
+        //     .com.apple.mobile_container_manager.metadata.plist   前导点那份是 0600，我们读是 EPERM
+        //     com.apple.mobile_container_manager.metadata.plist    去掉前导点的副本，世界可读
+        // 1.1.2 只读了带点的那份，于是每个容器都是 `meta=拒`，白丢了一条铁证。
+        // 现在先读不带点的，再退回带点的。
         var metaNote = "缺"
-        var metaError: Int32 = 0
-        if let data = readSmallFile(
-            containerFD,
-            ".com.apple.mobile_container_manager.metadata.plist",
-            error: &metaError
-        ) {
+        for name in metadataFileNames {
+            var metaError: Int32 = 0
+            guard let data = readSmallFile(containerFD, name, error: &metaError) else {
+                metaNote += (name.hasPrefix(".") ? "/隐" : "") + describe(metaError)
+                continue
+            }
             if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
                let dictionary = plist as? [String: Any] {
-                for key in ["MCMMetadataIdentifier", "MCMMetadataBundleIdentifier"] {
+                for key in ["MCMMetadataIdentifier", "MCMMetadataBundleIdentifier", "Identifier"] {
                     if let value = dictionary[key] as? String, looksLikeBundleID(value) {
                         remember(container: containerName, bundleID: value)
                         return value
@@ -106,8 +112,6 @@ enum AppNames {
             } else {
                 metaNote = "解析失败(\(data.count)B)"
             }
-        } else {
-            metaNote = describe(metaError)
         }
 
         // ③ 逐级查目录。失败原因攒起来，识别不出来时留给诊断页。
@@ -133,6 +137,12 @@ enum AppNames {
         noteFailure(containerName, trace: trace)
         return nil
     }
+
+    /// 容器根目录的元数据文件名，按可读性排序（不带前导点的那份世界可读）。
+    private static let metadataFileNames = [
+        "com.apple.mobile_container_manager.metadata.plist",
+        ".com.apple.mobile_container_manager.metadata.plist"
+    ]
 
     /// 列一个目录的前几个条目名，用于诊断。打不开返回 nil。
     private static func briefNames(_ parent: Int32, _ relative: String?, limit: Int = 6) -> String? {
