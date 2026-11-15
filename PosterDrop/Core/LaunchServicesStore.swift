@@ -82,11 +82,12 @@ enum LaunchServicesStore {
         guard let data = readFile(path), data.count > 1_024 else { return nil }
         let result = extract(from: data, log: log)
         guard !result.containers.isEmpty || result.identifiers.count > 20 else { return nil }
+        let pairs = containerMap(in: data, log: log)
         log("   csstore 命中：\(path)（\(data.count / 1024) KB）")
         return Harvest(
             identifiers: result.identifiers,
             containers: result.containers,
-            pairs: result.pairs,
+            pairs: pairs,
             source: path
         )
     }
@@ -279,13 +280,11 @@ enum LaunchServicesStore {
     private static func extract(
         from data: Data,
         log: (String) -> Void
-    ) -> (identifiers: [String], containers: [String], pairs: [String: String]) {
+    ) -> (identifiers: [String], containers: [String]) {
         var identifiers: [String] = []
         var containers: [String] = []
         var seenIdentifiers = Set<String>()
         var seenContainers = Set<String>()
-        var pairs: [String: String] = [:]
-        var conflicted = Set<String>()
 
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
@@ -335,23 +334,6 @@ enum LaunchServicesStore {
                         if seenContainers.insert(candidate).inserted {
                             containers.append("/private/var/mobile/Containers/Data/Application/\(candidate)")
                         }
-                        // 顺手把「这个 UUID 属于哪个 App」配出来。
-                        // 路径字符串本身以 `/private/var/mobile/Containers/...` 开头，
-                        // 直接往回读只会读到 `Containers`，所以要先退到字符串起点。
-                        if !conflicted.contains(candidate) {
-                            let urlStart = stringStart(base, cursor, count)
-                            if let token = identifierBefore(base, urlStart) {
-                                if let existing = pairs[candidate] {
-                                    // 同一个 UUID 配出两个名字，说明推断不可信，整条丢掉。
-                                    if existing != token {
-                                        pairs.removeValue(forKey: candidate)
-                                        conflicted.insert(candidate)
-                                    }
-                                } else {
-                                    pairs[candidate] = token
-                                }
-                            }
-                        }
                         cursor = uuidStart + uuidLength
                     } else {
                         cursor += 1
@@ -360,85 +342,180 @@ enum LaunchServicesStore {
             }
         }
 
-        log("   csstore 解析：\(identifiers.count) 个 bundleID，\(containers.count) 个容器路径，\(pairs.count) 个容器配对到名字")
-        return (identifiers, containers, pairs)
+        log("   csstore 解析：\(identifiers.count) 个 bundleID，\(containers.count) 个容器路径")
+        return (identifiers, containers)
     }
 
-    /// 路径字符串的起点。往回退到第一个不属于路径的字节（长度前缀或另一个字符串）。
-    private static func stringStart(_ base: UnsafePointer<UInt8>, _ offset: Int, _ count: Int) -> Int {
-        var index = offset
-        var steps = 0
-        while index > 0, isPathByte(base[index - 1]) {
-            index -= 1
-            steps += 1
-            // 单条路径不会超过 512 字节；超了说明回溯已经跑偏，直接放弃。
-            if steps > 512 { return offset }
-        }
-        return index
+    // MARK: - 记录级解析：容器 UUID → bundle id
+
+    /// csstore 里的一条记录。偏移都是从记录体（`size` 字段之后）算起，
+    /// 值是该字符串头的 sid。
+    private struct Layout {
+        let size: Int
+        let bundle: Int
+        let container: Int
     }
 
-    /// 取 `end` 之前最近的一个 bundle id 样式的字符串。
+    /// 各系统版本已知的排布，按「新版本在前」排列。
     ///
-    /// 跳过 24 个字节的分隔（长度前缀、对齐用的零字节），再往回收到非标识符字节为止。
-    /// 任何一条校验不过就返回 nil —— 宁可不出配对，也不能把一个错的 App 名贴到容器上。
-    private static func identifierBefore(_ base: UnsafePointer<UInt8>, _ end: Int) -> String? {
-        guard end > 0 else { return nil }
-        var index = end
-        var skipped = 0
-        while index > 0, !isIdentifierByte(base[index - 1]) {
-            index -= 1
-            skipped += 1
-            if skipped > 24 { return nil }
-        }
-        guard index > 0 else { return nil }
-
-        var start = index
-        while start > 0, isIdentifierByte(base[start - 1]), index - start < 156 {
-            start -= 1
-        }
-        let length = index - start
-        guard length >= 6, length <= 155 else { return nil }
-
-        let token = String(
-            decoding: UnsafeBufferPointer(start: base + start, count: length),
-            as: UTF8.self
-        )
-        guard token.contains("."), !token.contains(".."),
-              !token.hasPrefix("."), !token.hasSuffix("."),
-              !token.hasPrefix("-"), !token.hasSuffix("-"),
-              !token.hasPrefix("group."), !token.hasPrefix("systemgroup."),
-              isValidBundleIdentifier(token),
-              hasKnownTLD(token),
-              token.split(separator: ".").count <= 6 else { return nil }
-        return token
-    }
-
-    /// 首段必须是常见顶级域。
-    ///
-    /// 回溯可能停在字符串中间（长度字节恰好也是标识符字节时），
-    /// 于是 `com.tencent.xin` 会被切成 `encent.xin` —— 它「看起来」完全合法。
-    /// 卡住首段可以挡掉这一类断头名字，代价只是漏配几条。
-    private static func hasKnownTLD(_ token: String) -> Bool {
-        guard let head = token.split(separator: ".", maxSplits: 1).first else { return false }
-        return knownTLDs.contains(head.lowercased())
-    }
-
-    private static let knownTLDs: Set<String> = [
-        "com", "org", "net", "io", "me", "co", "cn", "app", "dev", "xyz",
-        "tv", "info", "us", "uk", "jp", "kr", "de", "fr", "ru", "in", "sg",
-        "hk", "tw", "ai", "gg", "to", "fm", "sh", "so", "ly", "cc", "name",
-        "biz", "mobi", "edu", "gov", "cloud", "site", "top", "vip", "pro",
-        "link", "tech", "studio", "page", "blog", "store", "online", "live",
-        "fun", "ltd", "group", "work", "space", "website", "host", "press",
-        "chat", "games", "team", "plus", "art", "design", "codes", "media",
-        "world", "life", "today", "center", "company", "systems", "network",
-        "digital", "global", "solutions", "services", "support", "tools",
-        "zone", "one", "moe", "run", "email", "agency", "wiki", "social"
+    /// 这些数字不是猜的：来自 WQFiles 的 `WQLSLayouts`，其中 iOS 27.3 那几项
+    /// 是作者在 24C5037i（就是这台机器）上实测确认的——App 记录 0x25c 字节、
+    /// bundle id 在 +0x0c、容器路径在 +0x6c，1491/1493 个容器路径都能配上。
+    /// 每轮会挑「配上的容器最多」的那一组，所以列错一条也不会把结果带歪。
+    private static let layouts: [Layout] = [
+        Layout(size: 0x25c, bundle: 0x0c, container: 0x6c),   // 27.x App
+        Layout(size: 0xf0,  bundle: 0x04, container: 0x6c),   // 27.3 扩展
+        Layout(size: 0xf0,  bundle: 0x00, container: 0x6c),
+        Layout(size: 0x134, bundle: 0x04, container: 0x58),
+        Layout(size: 0x134, bundle: 0x00, container: 0x58),
+        Layout(size: 0x120, bundle: 0x04, container: 0x58),   // 27.2 扩展
+        Layout(size: 0x120, bundle: 0x00, container: 0x58),
+        Layout(size: 0x250, bundle: 0x0c, container: 0x68),   // 27.0 App
+        Layout(size: 0x118, bundle: 0x00, container: 0x54),   // 27.0 扩展
+        Layout(size: 0x23c, bundle: 0x0c, container: 0x64),   // 26 App
+        Layout(size: 0x104, bundle: 0x00, container: 0x50),   // 26 扩展
+        Layout(size: 0x23c, bundle: 0x0c, container: 0x60),   // 26.5
+        Layout(size: 0x104, bundle: 0x00, container: 0x4c)
     ]
 
+    /// 解析 `UUID → bundle id`。
+    ///
+    /// 上一版靠「bundle id 字符串紧挨着容器路径」的相邻性推断，在这台机器上
+    /// 一条都没配上——字符串表里两者的顺序并不是那样。真正的结构是定长记录：
+    ///
+    ///     记录 = [u32][u32 size][body: size 字节]
+    ///     字段 = 字符串头的 sid；字符串 = [u32 sid][u32 长度][UTF-8][补齐到 4]
+    ///
+    /// 所以只要认出记录（第二字段是已知 size），按偏移读出 sid 就能拿到
+    /// 容器路径和 bundle id，跟相邻性无关。
+    private static func containerMap(in data: Data, log: (String) -> Void) -> [String: String] {
+        var merged: [String: String] = [:]
+        var bestCount = 0
+
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            let count = raw.count
+
+            func word(_ offset: Int) -> UInt32 {
+                guard offset >= 0, offset + 4 <= count else { return 0 }
+                return UInt32(base[offset])
+                    | UInt32(base[offset + 1]) << 8
+                    | UInt32(base[offset + 2]) << 16
+                    | UInt32(base[offset + 3]) << 24
+            }
+
+            // 字符串头的第一个字段既是「id」，又等于「字节偏移 / 4」——不同的
+            // 解析器用不同的那一半，所以两张表都留着，取值时按需回退。
+            var byID: [UInt32: String] = [:]
+            var byOffset: [Int: String] = [:]
+            byID.reserveCapacity(24_000)
+            byOffset.reserveCapacity(24_000)
+
+            var offset = 0
+            while offset + 8 <= count {
+                let id = word(offset)
+                let length = Int(word(offset + 4))
+                if id != 0, length > 0, length < 0x800, offset + 8 + length <= count {
+                    let start = offset + 8
+                    // 字符串按 4 字节补齐；长度正好是 4 的倍数时没有结尾零字节。
+                    let terminated = length % 4 != 0
+                        ? (start + length < count && base[start + length] == 0)
+                        : true
+                    if terminated, hasNoZero(base + start, length),
+                       let text = String(
+                        bytes: UnsafeBufferPointer(start: base + start, count: length),
+                        encoding: .utf8
+                       ) {
+                        byID[id] = text
+                        byOffset[offset] = text
+                    }
+                }
+                offset += 4
+            }
+
+            /// 字段值 → 字符串。四种对应关系都试一遍，都是同一条字符串的等价写法。
+            func resolve(_ value: UInt32) -> String? {
+                if value == 0 { return nil }
+                if let text = byID[value] { return text }
+                if let text = byID[value >> 2] { return text }
+                if let text = byOffset[Int(value)] { return text }
+                return byOffset[Int(value >> 2)]
+            }
+
+            /// 把记录按 size 分组，只留已知的那几种，避免误把随机数据当记录。
+            let knownSizes = Set(layouts.map(\.size))
+            var groups: [Int: [Int]] = [:]
+            var scan = 0
+            while scan + 8 <= count {
+                let size = Int(word(scan + 4))
+                if knownSizes.contains(size), scan + 8 + size <= count {
+                    groups[size, default: []].append(scan + 8)
+                }
+                scan += 4
+            }
+
+            for layout in layouts {
+                guard let starts = groups[layout.size], layout.container + 4 <= layout.size else { continue }
+                var mine: [String: String] = [:]
+                var conflicted = Set<String>()
+
+                for body in starts {
+                    guard layout.bundle + 4 <= layout.size else { continue }
+                    guard let path = resolve(word(body + layout.container)),
+                          let uuid = containerUUID(path),
+                          let bundleID = resolve(word(body + layout.bundle)),
+                          isBundleID(bundleID) else { continue }
+
+                    if let existing = mine[uuid] {
+                        if existing != bundleID { conflicted.insert(uuid) }
+                    } else {
+                        mine[uuid] = bundleID
+                    }
+                }
+                for uuid in conflicted { mine.removeValue(forKey: uuid) }
+
+                if mine.count > bestCount {
+                    bestCount = mine.count
+                    merged = mine
+                }
+            }
+        }
+
+        log("   csstore 配对：\(bestCount) 个容器认出了 bundle id")
+        return merged
+    }
+
+    /// `/private/var/mobile/Containers/Data/{Application,PluginKitPlugin}/<UUID>` → UUID。
+    private static func containerUUID(_ path: String) -> String? {
+        var text = path.hasSuffix("/") ? String(path.dropLast()) : path
+        if text.hasPrefix("/var/") {
+            text = "/private" + text
+        }
+        for prefix in [
+            "/private/var/mobile/Containers/Data/Application/",
+            "/private/var/mobile/Containers/Data/PluginKitPlugin/"
+        ] where text.hasPrefix(prefix) {
+            let uuid = String(text.dropFirst(prefix.count))
+            return UUID(uuidString: uuid) != nil ? uuid : nil
+        }
+        return nil
+    }
+
+    /// 字符串体里不能有零字节（补齐用的零在长度之外）。
     @inline(__always)
-    private static func isPathByte(_ byte: UInt8) -> Bool {
-        byte == 47 || isIdentifierByte(byte)      // '/'
+    private static func hasNoZero(_ base: UnsafePointer<UInt8>, _ length: Int) -> Bool {
+        var index = 0
+        while index < length {
+            if base[index] == 0 { return false }
+            index += 1
+        }
+        return true
+    }
+
+    private static func isBundleID(_ value: String) -> Bool {
+        guard value.count >= 6, value.count <= 155, value.contains(".") else { return false }
+        guard !value.contains("/"), !value.contains(" "), !value.hasPrefix(".") else { return false }
+        return isValidBundleIdentifier(value)
     }
 
     private static func isIdentifierByte(_ byte: UInt8) -> Bool {

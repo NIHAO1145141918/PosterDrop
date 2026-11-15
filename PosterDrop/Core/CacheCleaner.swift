@@ -831,13 +831,14 @@ final class CacheCleaner: @unchecked Sendable {
 
         // 标题要的是「微信」这种名字，不是 UUID。
         //
-        // 索引可用时直接给 bundle id；索引不可用（自签 App 的常态）就从容器
-        // 内部反推：xattr → 容器元数据 → 偏好设置文件名 → 缓存子目录 → 快照目录。
+        // 顺序按可信度：containermanagerd 索引 → csstore 的记录（LaunchServices
+        // 自己写的对照表，最权威）→ 从容器内部反推（xattr、元数据、偏好设置……）。
+        // 反推排最后，因为它会从残留的 `com.apple.*.plist` 猜出别人的名字。
         // 全部落空才退回短 UUID，仍然保留可区分性。
         let containerName = (path as NSString).lastPathComponent
         let bundleID = identifier
-            ?? AppNames.bundleID(containerFD: containerFD, containerName: containerName)
             ?? ContainerLocator.csstoreBundleID(forContainerPath: path)
+            ?? AppNames.bundleID(containerFD: containerFD, containerName: containerName)
 
         let title: String
         let subtitle: String?
