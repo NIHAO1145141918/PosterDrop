@@ -159,56 +159,57 @@ final class PairingStore {
     }
 
     static func parse(_ data: Data) throws -> PairingRecord {
-        guard let plist = try? PropertyListSerialization.propertyList(
-            from: data, options: [], format: nil
-        ), let dictionary = plist as? [String: Any] else {
-            throw PairingError.badFile("不是有效的 plist")
+        guard let dictionary = plistDictionary(from: data) else {
+            throw PairingError.badFile("不是有效的 plist（文件开头：\(preview(data))）")
         }
 
-        // 两套命名都要认：
-        //   lockdown / idevicepair : HostID, HostCertificate, HostPrivateKey ...
-        //   RPPairing (iOS 17+)     : hostID, hostCertificate, hostPrivateKey ...
-        func value(_ names: [String]) -> Any? {
-            for name in names {
-                if let found = dictionary[name] { return found }
+        // 只认顶层字段是之前一直「提示缺少」的原因：不同工具导出的配对记录
+        // 层级不一样（有的把材料塞在 RPPairing / PairingData 子字典里，有的
+        // 整个再 base64 一层），顶层直接找就会一个都找不到。
+        // 现在整棵树收一遍，再按「深度浅、键名更具体」挑。
+        var found: [Found] = []
+        var budget = 4_000
+        collect(in: dictionary, context: [], depth: 0, into: &found, budget: &budget)
+
+        let certificateKeys: Set<String> = [
+            "hostcertificate", "hostcert", "hostcertificatedata", "hostcertificatechain"
+        ]
+        let keyKeys: Set<String> = [
+            "hostprivatekey", "hostkey", "hostprivatekeydata", "privatekey"
+        ]
+        let excludes = ["root", "device", "escrow"]
+
+        guard let certificateValue = bestValue(in: found, keys: certificateKeys, excluding: excludes),
+              let certificateBlob = blob(from: certificateValue) else {
+            throw PairingError.badFile("缺少 HostCertificate（文件里的键：\(keySummary(found))）")
+        }
+        guard let keyValue = bestValue(in: found, keys: keyKeys, excluding: excludes),
+              let keyBlob = blob(from: keyValue) else {
+            // 密码保护的私钥会被这里拦下，但报「缺少」会让人以为是文件不对
+            if let raw = bestValue(in: found, keys: keyKeys, excluding: excludes)
+                .flatMap({ text(from: $0) }), raw.contains("ENCRYPTED") {
+                throw PairingError.badFile("私钥有密码保护，请导出未加密的 PKCS#1 / PKCS#8")
             }
-            return nil
+            throw PairingError.badFile("缺少 HostPrivateKey（文件里的键：\(keySummary(found))）")
         }
 
-        func string(_ names: [String]) -> String? {
-            if let text = value(names) as? String, !text.isEmpty { return text }
-            if let data = value(names) as? Data,
-               let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                return text
-            }
-            return nil
+        func string(_ keys: Set<String>) -> String {
+            guard let value = bestValue(in: found, keys: keys, excluding: []) else { return "" }
+            return text(from: value) ?? ""
         }
 
-        func blob(_ names: [String]) -> Data? {
-            if let data = value(names) as? Data, !data.isEmpty { return data }
-            if let text = value(names) as? String {
-                return Self.der(fromPEM: text)
-            }
-            return nil
-        }
-
-        let hostID = string(["HostID", "hostID"]) ?? ""
-        let systemBUID = string(["SystemBUID", "systemBUID"]) ?? ""
-
-        guard let certificateBlob = blob(["HostCertificate", "hostCertificate"]) else {
-            throw PairingError.badFile("缺少 HostCertificate")
-        }
-        guard let keyBlob = blob(["HostPrivateKey", "hostPrivateKey"]) else {
-            throw PairingError.badFile("缺少 HostPrivateKey")
-        }
+        let hostID = string(["hostid", "hostidentifier"])
+        let systemBUID = string(["systembuid", "systembuidstring"])
 
         // 证书必须是能解析的 DER，否则后面 SecCertificateCreateWithData 会静默返回 nil，
         // 报错会跑到 TLS 那一步，很难定位。
         guard SecCertificateCreateWithData(nil, certificateBlob as CFData) != nil else {
-            throw PairingError.badFile("HostCertificate 不是有效的 DER 证书")
+            throw PairingError.badFile(
+                "HostCertificate 不是有效的 DER 证书（\(certificateBlob.count) 字节，开头 \(preview(certificateBlob))）"
+            )
         }
 
-        let altIRK = string(["AltIRK", "altIRK", "hostAltIRK"]) ?? ""
+        let altIRK = string(["altirk", "hostaltirk"])
         if !altIRK.isEmpty {
             PairingStore.shared.storedAltIRK = altIRK
         }
@@ -217,22 +218,178 @@ final class PairingStore {
             hostID: hostID,
             systemBUID: systemBUID,
             hostCertificate: certificateBlob,
-            hostPrivateKey: keyBlob,
-            deviceCertificate: blob(["DeviceCertificate", "deviceCertificate"]),
-            rootCertificate: blob(["RootCertificate", "rootCertificate"]),
+            // macOS 导出的 `-----BEGIN PRIVATE KEY-----` 是 PKCS#8，
+            // SecKeyCreateWithData 只吃 PKCS#1，这里先剥一层。
+            hostPrivateKey: pkcs1(from: keyBlob) ?? keyBlob,
+            deviceCertificate: bestValue(in: found, keys: ["devicecertificate"], excluding: [])
+                .flatMap { blob(from: $0) },
+            rootCertificate: bestValue(in: found, keys: ["rootcertificate"], excluding: [])
+                .flatMap { blob(from: $0) },
             keychainLabel: keychainLabel
         )
     }
 
-    /// PEM → DER。配对文件里的证书有时是文本形式。
+    // MARK: - 解析辅助
+
+    private struct Found {
+        let key: String
+        let value: Any
+        let context: [String]
+        let depth: Int
+    }
+
+    /// plist，以及「plist 再 base64 一层」的情况。
+    private static func plistDictionary(from data: Data) -> [String: Any]? {
+        if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+           let dictionary = plist as? [String: Any] {
+            return dictionary
+        }
+        let text = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let compact = text.replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+        guard let decoded = Data(base64Encoded: compact),
+              let plist = try? PropertyListSerialization.propertyList(from: decoded, options: [], format: nil),
+              let dictionary = plist as? [String: Any] else {
+            return nil
+        }
+        return dictionary
+    }
+
+    /// 遍历整棵 plist 树收集键值。深度和节点数都设上限，异常文件不至于把导入拖死。
+    private static func collect(
+        in node: Any,
+        context: [String],
+        depth: Int,
+        into found: inout [Found],
+        budget: inout Int
+    ) {
+        guard budget > 0, depth <= 8 else { return }
+        budget -= 1
+
+        if let dictionary = node as? [String: Any] {
+            for (key, value) in dictionary {
+                found.append(Found(key: key, value: value, context: context, depth: depth))
+                // 只往字典/数组里继续下钻，Data 和 String 是叶子
+                collect(in: value, context: context + [key], depth: depth + 1, into: &found, budget: &budget)
+            }
+        } else if let array = node as? [Any] {
+            for (index, value) in array.enumerated() {
+                collect(in: value, context: context + ["[\(index)]"], depth: depth + 1, into: &found, budget: &budget)
+            }
+        }
+    }
+
+    /// 按「深度浅优先、键名更具体优先」挑一个候选。
+    private static func bestValue(
+        in found: [Found],
+        keys: Set<String>,
+        excluding: [String]
+    ) -> Any? {
+        let candidates = found.filter { keys.contains($0.key.lowercased()) }
+        guard !candidates.isEmpty else { return nil }
+
+        // RootCertificate / DeviceCertificate / RootPrivateKey 都在同一棵树里，
+        // 名字像但不是我们要的那份，先排除掉（键名和它所在的层级都看）。
+        let filtered = candidates.filter { item in
+            let haystack = ([item.key] + item.context).joined(separator: ".").lowercased()
+            return !excluding.contains { haystack.contains($0) }
+        }
+        let pool = filtered.isEmpty ? candidates : filtered
+        return pool.sorted {
+            if $0.depth != $1.depth { return $0.depth < $1.depth }
+            return $0.key.count > $1.key.count
+        }.first?.value
+    }
+
+    private static func text(from value: Any) -> String? {
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let data = value as? Data, let text = String(data: data, encoding: .utf8) {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
+    }
+
+    private static func blob(from value: Any) -> Data? {
+        if let data = value as? Data, !data.isEmpty { return data }
+        guard let text = text(from: value) else { return nil }
+        return der(fromPEM: text)
+    }
+
+    /// 给报错用的键名清单。用户截图这一行就能看出文件到底是什么结构。
+    private static func keySummary(_ found: [Found]) -> String {
+        var seen = Set<String>()
+        let keys = found
+            .filter { $0.depth <= 1 }
+            .map(\.key)
+            .filter { seen.insert($0).inserted }
+        guard !keys.isEmpty else { return "空" }
+        let shown = keys.prefix(10).joined(separator: ", ")
+        return keys.count > 10 ? "\(shown) …共 \(keys.count) 个" : shown
+    }
+
+    private static func preview(_ data: Data) -> String {
+        let head = data.prefix(16)
+        let ascii = head.map { byte -> Character in
+            (32...126).contains(byte) ? Character(UnicodeScalar(byte)) : "."
+        }
+        return "\(String(ascii)) / \(head.map { String(format: "%02X", $0) }.joined(separator: " "))"
+    }
+
+    /// PKCS#8 → PKCS#1。
+    ///
+    /// RSAPrivateKey ::= SEQUENCE { INTEGER 0, INTEGER n, ... }
+    /// PrivateKeyInfo ::= SEQUENCE { INTEGER 0, SEQUENCE { OID, NULL }, OCTET STRING }
+    /// 两者第一个元素都是 INTEGER 0，看第二个元素就能分开：INTEGER 是 PKCS#1，SEQUENCE 是 PKCS#8。
+    static func pkcs1(from der: Data) -> Data? {
+        let bytes = [UInt8](der)
+        guard let outer = tlv(bytes, 0), outer.tag == 0x30 else { return nil }
+        guard let version = tlv(bytes, outer.start), version.tag == 0x02 else { return nil }
+        guard let second = tlv(bytes, version.start + version.length) else { return nil }
+        if second.tag == 0x02 { return nil }        // 已经是 PKCS#1
+        guard second.tag == 0x30 else { return nil }
+        guard let third = tlv(bytes, second.start + second.length), third.tag == 0x04 else { return nil }
+
+        let inner = Data(bytes[third.start..<(third.start + third.length)])
+        guard inner.count > 8, inner[inner.startIndex] == 0x30 else { return nil }
+        return inner
+    }
+
+    /// 读一个 DER TLV，返回标签、内容起始下标、内容长度。
+    private static func tlv(_ bytes: [UInt8], _ offset: Int) -> (tag: UInt8, start: Int, length: Int)? {
+        guard offset >= 0, offset + 1 < bytes.count else { return nil }
+        let tag = bytes[offset]
+        var cursor = offset + 1
+        var length = Int(bytes[cursor])
+        cursor += 1
+        if length & 0x80 != 0 {
+            let count = length & 0x7F
+            guard count >= 1, count <= 4, cursor + count <= bytes.count else { return nil }
+            length = 0
+            for _ in 0..<count {
+                length = (length << 8) | Int(bytes[cursor])
+                cursor += 1
+            }
+        }
+        guard length >= 0, cursor + length <= bytes.count else { return nil }
+        return (tag, cursor, length)
+    }
+
+    /// PEM / 裸 base64 → DER。配对文件里的证书有时是文本形式。
     static func der(fromPEM text: String) -> Data? {
         guard text.contains("-----BEGIN") else {
-            // 不是 PEM，可能本身就是 base64 裸串
-            return Data(base64Encoded: text.trimmingCharacters(in: .whitespacesAndNewlines))
+            // 不是 PEM，可能本身就是 base64 裸串（常常带换行，先去掉空白）
+            let compact = text.filter { !$0.isWhitespace }
+            return Data(base64Encoded: compact)
         }
         let body = text
             .components(separatedBy: .newlines)
-            .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+            // PEM 头部偶尔夹着 `Proc-Type: 4,ENCRYPTED` 这类行，带冒号的一律不是 base64
+            .filter { !$0.hasPrefix("-----") && !$0.isEmpty && !$0.contains(":") }
             .joined()
         return Data(base64Encoded: body)
     }

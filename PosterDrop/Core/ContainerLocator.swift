@@ -166,8 +166,7 @@ enum ContainerLocator {
         }
 
         log(stamp("③ containermanagerd 枚举…"))
-        let enumerated = enumerateContainers()
-        log(stamp("   可见容器 \(enumerated.count) 个"))
+        let enumerated = enumerateContainers(log: { log(stamp($0)) })
         for item in enumerated where matches(item.identifier, target: bundleID) {
             log(stamp("   命中 \(item.identifier)：\(item.path)"))
             if verify(path: item.path, group: group, target: bundleID, log: { log(stamp($0)) }) {
@@ -851,8 +850,9 @@ enum ContainerLocator {
     private typealias ObjectGetPath = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
     private typealias ObjectGetIdentifier = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
 
-    private static func enumerateContainers() -> [Entry] {
+    private static func enumerateContainers(log: (String) -> Void) -> [Entry] {
         guard let manager = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL) else {
+            log("   容器枚举：dylib 打不开")
             return []
         }
         defer { dlclose(manager) }
@@ -867,30 +867,45 @@ enum ContainerLocator {
               let iterate = symbol("container_query_iterate_results_sync", as: QueryIterate.self),
               let freeQuery = symbol("container_query_free", as: QueryFree.self),
               let getPath = symbol("container_object_get_path", as: ObjectGetPath.self)
-        else { return [] }
+        else {
+            log("   容器枚举：符号缺失")
+            return []
+        }
 
-        let setOtherOwners = symbol("container_query_set_include_other_owners", as: QuerySetBool.self)
         let getIdentifier = symbol("container_object_get_identifier", as: ObjectGetIdentifier.self)
             ?? symbol("container_result_get_identifier", as: ObjectGetIdentifier.self)
 
         var results: [Entry] = []
         var seen = Set<String>()
+        var perClass: [String] = []
 
-        // WQFiles 用的这组 class；0 是全局，2 是 App，5/10 是扩展/插件
-        for cls in [UInt64(0), 2, 5, 7, 8, 10, 11, 13] {
+        // 只设 class、不设父目录，也不设 other-owners——这是 WQFiles 的写法。
+        //
+        // 两处都与之前不同：
+        //   · class 从 {0,2,5,7,8,10,11,13} 改成 1…14 全试。class 的含义随系统版本
+        //     变过，漏掉一个就等于整类容器看不见。
+        //   · 去掉 container_query_set_include_other_owners(true)。查询不带 identifier
+        //     时这个开关会让部分版本的 query 直接返回空集，而不是「放宽归属」。
+        //
+        // 不按父目录查才是重点：27.x 上给 Data/Application 签父目录扩展必得 -6，
+        // 但按 class 全量拉不需要那个扩展，返回的对象自带路径（和 identifier）。
+        for cls in UInt64(1)...14 {
             guard let query = create() else { continue }
             setClass(query, cls)
-            setOtherOwners?(query, true)
+            var count = 0
             iterate(query, { object in
                 guard let object, let pathPointer = getPath(object) else { return true }
                 let path = String(cString: pathPointer)
                 guard !path.isEmpty else { return true }
+                count += 1
 
-                let identifier: String
+                var identifier = ""
                 if let getIdentifier, let idPointer = getIdentifier(object) {
                     identifier = String(cString: idPointer)
-                } else {
-                    identifier = ""
+                }
+                // identifier 拿不到时读扩展属性：WQFiles 的 wq_container_label 也是先试这个。
+                if identifier.isEmpty {
+                    identifier = SandboxEscape.containerIdentifier(at: path) ?? ""
                 }
 
                 let key = path + "|" + identifier
@@ -900,6 +915,13 @@ enum ContainerLocator {
                 return true
             })
             freeQuery(query)
+            if count > 0 { perClass.append("\(cls)×\(count)") }
+        }
+
+        if perClass.isEmpty {
+            log("   容器枚举：14 个 class 全空")
+        } else {
+            log("   容器枚举：\(results.count) 个（class \(perClass.joined(separator: " "))）")
         }
         return results
     }

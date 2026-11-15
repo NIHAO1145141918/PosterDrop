@@ -46,6 +46,10 @@ enum LaunchServicesStore {
         for directory in candidateDirectories {
             if let hit = harvest(directory: directory, log: log) { return hit }
         }
+        // 三个候选目录都读不到：按 object id 倒序直接找文件本身。
+        if let path = locateStore(log: log), let hit = harvest(file: path, log: log) {
+            return hit
+        }
         return nil
     }
 
@@ -62,20 +66,158 @@ enum LaunchServicesStore {
 
         for name in stores {
             let path = (directory as NSString).appendingPathComponent(name)
-            guard let data = readFile(path) else { continue }
-            guard data.count > 1_024 else { continue }
-
-            let result = extract(from: data, log: log)
-            if !result.containers.isEmpty || result.identifiers.count > 20 {
-                log("   csstore 命中：\(path)（\(data.count / 1024) KB）")
-                return Harvest(
-                    identifiers: result.identifiers,
-                    containers: result.containers,
-                    source: path
-                )
-            }
+            if let hit = harvest(file: path, log: log) { return hit }
         }
         return nil
+    }
+
+    /// 直接按完整路径读一个 csstore。
+    static func harvest(file path: String, log: (String) -> Void) -> Harvest? {
+        guard let data = readFile(path), data.count > 1_024 else { return nil }
+        let result = extract(from: data, log: log)
+        guard !result.containers.isEmpty || result.identifiers.count > 20 else { return nil }
+        log("   csstore 命中：\(path)（\(data.count / 1024) KB）")
+        return Harvest(
+            identifiers: result.identifiers,
+            containers: result.containers,
+            source: path
+        )
+    }
+
+    // MARK: - 倒序定位
+
+    private typealias FSGetPath = @convention(c) (
+        UnsafeMutablePointer<CChar>?, Int, UnsafeMutablePointer<fsid_t>?, UInt64
+    ) -> Int
+
+    /// 20 秒上限。过了还没命中，说明 csstore 不在这台设备的预期位置，
+    /// 继续扫下去不如直接回落到 fsgetpath 全量——那边至少能出容器。
+    private static let searchLimit: TimeInterval = 20
+    private static let searchChunk: Int64 = 32_768
+    private static let inodeMargin: Int64 = 100_000
+
+    /// 卷标识 + 「比任何已存在 id 都大」的上界。
+    ///
+    /// 上界不用猜：在自己的目录里建个临时文件，它的 inode 就是当前卷的最大 id，
+    /// 加十万余量兜住并发写入。WQFiles 的 `wq_volume_max_inode` 是同一个办法。
+    private static func volumeProbe() -> (fsid: fsid_t, upper: Int64)? {
+        let candidates = [
+            FileManager.default.temporaryDirectory,
+            FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+            FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        ].compactMap { $0 }
+
+        for directory in candidates {
+            let url = directory.appendingPathComponent(".pd-ls-\(UUID().uuidString)")
+            let fd = open(url.path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+            guard fd >= 0 else { continue }
+            var st = stat()
+            var sfs = statfs()
+            let ok = fstat(fd, &st) == 0 && fstatfs(fd, &sfs) == 0
+            close(fd)
+            unlink(url.path)
+            guard ok else { continue }
+
+            let inode = Int64(st.st_ino)
+            guard inode > 0, inode < Int64.max - inodeMargin else { continue }
+            return (sfs.f_fsid, inode + inodeMargin)
+        }
+        return nil
+    }
+
+    /// 按 object id 倒序找一个 `com.apple.LaunchServices-*.csstore`。
+    ///
+    /// 方向是关键。APFS 的 object id 单调递增，而 csstore 每次安装或更新 App
+    /// 都会被重写，所以它的 id 永远落在最新那一端。从 upper 往下扫，几万个 id
+    /// 之内就能命中；从 1 往上扫则要把整卷走完——这就是数秒和 250 秒的差别。
+    ///
+    /// 只做纯文件读，全程不签发扩展：调用发生在清理流程内部，此时批处理的交换
+    /// 链接已经生效，再签一次会把链接 retarget 掉（见 `listDirectory` 的注释）。
+    static func locateStore(log: (String) -> Void) -> String? {
+        guard let probe = volumeProbe() else {
+            log("   csstore 定位：拿不到卷上界")
+            return nil
+        }
+        guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fsgetpath") else {
+            log("   csstore 定位：系统没有 fsgetpath")
+            return nil
+        }
+        let fsgetpath = unsafeBitCast(pointer, to: FSGetPath.self)
+
+        let started = Date()
+        let chunks = (probe.upper + searchChunk - 1) / searchChunk
+        let workers = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
+
+        var next: Int64 = 0
+        var found: String?
+        var scanned: Int64 = 0
+        let lock = NSLock()
+
+        DispatchQueue.concurrentPerform(iterations: workers) { _ in
+            var fsid = probe.fsid
+            var buffer = [CChar](repeating: 0, count: 1200)
+
+            while true {
+                lock.lock()
+                let stop = found != nil || next >= chunks
+                let index = next
+                if !stop { next += 1 }
+                lock.unlock()
+                if stop { return }
+
+                let last = probe.upper - index * searchChunk
+                let first = max(1, last - searchChunk + 1)
+
+                for inode in stride(from: last, through: first, by: -1) {
+                    if (inode & 127) == 0 {
+                        if Date().timeIntervalSince(started) > searchLimit {
+                            lock.lock(); next = chunks; lock.unlock()
+                            return
+                        }
+                        lock.lock()
+                        let done = found != nil
+                        lock.unlock()
+                        if done { return }
+                    }
+                    let length = fsgetpath(&buffer, buffer.count, &fsid, UInt64(inode))
+                    guard length > 0, isStorePath(buffer) else { continue }
+
+                    let path = String(cString: buffer)
+                    lock.lock()
+                    if found == nil { found = path }
+                    next = chunks
+                    lock.unlock()
+                    return
+                }
+
+                lock.lock()
+                scanned += last - first + 1
+                lock.unlock()
+            }
+        }
+
+        lock.lock()
+        let hit = found
+        let total = scanned
+        lock.unlock()
+
+        if let hit {
+            let seconds = Date().timeIntervalSince(started)
+            log(String(format: "   csstore 定位：倒序扫 %.1f 秒、%lld 个 id 后命中", seconds, total))
+            return hit
+        }
+        log("   csstore 定位：倒序扫 \(total) 个 id 未命中（限时 \(Int(searchLimit)) 秒）")
+        return nil
+    }
+
+    /// 名字形如 `com.apple.LaunchServices-014501-v2.csstore`，只卡前后缀。
+    private static func isStorePath(_ path: UnsafePointer<CChar>) -> Bool {
+        guard let slash = strrchr(path, 47) else { return false }
+        let name = slash + 1
+        let length = Int(strlen(name))
+        guard length > 33 else { return false }
+        guard strncmp(name, "com.apple.LaunchServices-", 25) == 0 else { return false }
+        return strcmp(name.advanced(by: length - 8), ".csstore") == 0
     }
 
     // MARK: - 读目录 / 读文件
@@ -94,10 +236,16 @@ enum LaunchServicesStore {
     }
 
     private static func readFile(_ path: String) -> Data? {
-        let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?
-            .int64Value ?? 0
-        guard size > 0, size <= Int64(sizeLimit) else { return nil }
-        return try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+        if size > Int64(sizeLimit) { return nil }
+        // 有的容器里 attributes 读不到但文件本身可读，所以 size 未知时也试一次；
+        // mappedIfSafe 对大文件是 mmap，不会一次性拷进内存。
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) else {
+            return nil
+        }
+        guard !data.isEmpty, data.count <= sizeLimit else { return nil }
+        return data
     }
 
     // MARK: - 解析
