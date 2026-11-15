@@ -102,7 +102,7 @@ enum AppNames {
                     }
                 }
                 // 文件读到了却没有这两个键：多半是 group / 系统容器，键名不同。
-                metaNote = "无键(\(dictionary.keys.sorted().prefix(3).joined("/")))"
+                metaNote = "无键(\(dictionary.keys.sorted().prefix(3).joined(separator: "/")))"
             } else {
                 metaNote = "解析失败(\(data.count)B)"
             }
