@@ -77,7 +77,7 @@ final class RSDClient {
         log: (String) -> Void = { _ in }
     ) throws -> RSDHandshake {
         let pairing = try PairingStore.shared.record()
-        let identity = try PairingStore.identity(for: pairing)
+        let identity = try PairingStore.secIdentity(for: pairing)
 
         // 候选地址：显式指定 > 隧道 > mDNS 找到的局域网地址
         var candidates: [(String, UInt16)] = []
@@ -114,7 +114,7 @@ final class RSDClient {
     private static func checkin(
         host: String,
         port: UInt16,
-        identity: SecIdentity,
+        identity: sec_identity_t,
         timeout: TimeInterval,
         log: (String) -> Void
     ) throws -> RSDHandshake {
@@ -260,7 +260,7 @@ final class RSDLink {
     private var failure: String?
     private let timeout: TimeInterval
 
-    init(host: String, port: UInt16, identity: SecIdentity?, timeout: TimeInterval) throws {
+    init(host: String, port: UInt16, identity: sec_identity_t?, timeout: TimeInterval) throws {
         self.timeout = timeout
 
         // 用局部变量而不是 self.queue：此刻 connection 还没赋值，
@@ -270,8 +270,8 @@ final class RSDLink {
 
         let tls = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
-        if let identity, let secIdentity = sec_identity_create(identity) {
-            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
+        if let identity {
+            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, identity)
         }
         // 设备是自签证书，链式校验必然失败；身份由 pairing record 保证，
         // 这里只确认「对方持有对应私钥」（TLS 握手本身会验签）。

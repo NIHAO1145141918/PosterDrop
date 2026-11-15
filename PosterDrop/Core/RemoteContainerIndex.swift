@@ -137,9 +137,9 @@ final class RemoteContainerIndex {
             return report
         }
 
-        let identity: SecIdentity
+        let identity: sec_identity_t
         do {
-            identity = try PairingStore.shared.identity()
+            identity = try PairingStore.shared.secIdentity()
         } catch {
             let report = failed(
                 .pairingBroken,

@@ -42,7 +42,7 @@ enum InstallationProxy {
     /// Browse：拿全部 App。失败抛错，调用方负责回退。
     static func browse(
         handshake: RSDHandshake,
-        identity: SecIdentity?,
+        identity: sec_identity_t?,
         timeout: TimeInterval = 20,
         log: (String) -> Void = { _ in }
     ) throws -> [InstalledApp] {
@@ -111,7 +111,7 @@ enum InstallationProxy {
     static func lookup(
         _ bundleIDs: [String],
         handshake: RSDHandshake,
-        identity: SecIdentity?,
+        identity: sec_identity_t?,
         timeout: TimeInterval = 10
     ) throws -> [InstalledApp] {
         guard !bundleIDs.isEmpty else { return [] }
