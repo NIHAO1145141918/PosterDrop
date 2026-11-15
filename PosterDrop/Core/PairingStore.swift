@@ -239,31 +239,71 @@ final class PairingStore {
 
     // MARK: - TLS 身份
 
-    /// 把证书和私钥交给 TLS 层。
+    /// 把配对记录里的证书和私钥换成一个 TLS 层能用的身份。
     ///
-    /// iOS 上没有 `SecIdentityCreateWithCertificate`（macOS 专有），也没有
-    /// 「内存里的证书 + 私钥 → SecIdentity」的公开 API；往 keychain 里分别塞
-    /// 证书和私钥再查 `kSecClassIdentity`，合成结果同样不保证。
-    /// 但 TLS 层真正要的并不是 SecIdentity，而是 `sec_identity_t`，它有直接的
-    /// 构造入口 `sec_identity_create_with_certificates`（iOS 12+）：
-    /// 传证书数组 + 私钥即可，完全不碰 keychain。
+    /// iOS 上没有 `SecIdentityCreateWithCertificate`（macOS 专有）；
+    /// `sec_identity_create_with_certificates` 也只接受「已有的 identity + 追加证书链」，
+    /// 不能拿私钥现造。所以只剩 keychain 这一条路：把证书和私钥分别写进去，
+    /// 系统会按公钥把它们组合成一个 identity，再查 `kSecClassIdentity` 取出来。
     func secIdentity() throws -> sec_identity_t {
         let record = try self.record()
         return try Self.secIdentity(for: record)
     }
 
     static func secIdentity(for record: PairingRecord) throws -> sec_identity_t {
+        let identity = try identityObject(for: record)
+        guard let tls = sec_identity_create(identity) else {
+            throw PairingError.noIdentity("无法把这个 identity 交给 TLS 层")
+        }
+        return tls
+    }
+
+    static func identityObject(for record: PairingRecord) throws -> SecIdentity {
+        if let existing = matchIdentity(certificate: record.hostCertificate) {
+            return existing
+        }
         do {
-            return try makeIdentity(record)
+            try installToKeychain(record)
         } catch {
-            // 解析失败多半是私钥格式不对（PEM 没转 DER / 不是 PKCS#1）。
-            // 顺手清掉上次导入可能留在 keychain 里的半套东西，免得下次更乱。
+            // 半套条目留在 keychain 里只会让下次更难查，直接清掉。
             Self.wipeIdentity(label: record.keychainLabel)
             throw error
         }
+        if let installed = matchIdentity(certificate: record.hostCertificate) {
+            return installed
+        }
+        throw PairingError.noIdentity("证书和私钥没能配对成 identity")
     }
 
-    private static func makeIdentity(_ record: PairingRecord) throws -> sec_identity_t {
+    /// 按证书 DER 反查 identity。
+    ///
+    /// 不用 label 过滤：identity 的 label 取自证书，和私钥上的 label 不是一回事，
+    /// 按 label 查经常一条都查不到，所以全量取回再逐个比对证书内容。
+    private static func matchIdentity(certificate der: Data) -> SecIdentity? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let result else { return nil }
+
+        let items: [Any] = (result as? [Any]) ?? [result]
+        for item in items {
+            guard CFGetTypeID(item as AnyObject) == SecIdentityGetTypeID() else { continue }
+            let identity = unsafeBitCast(item as AnyObject, to: SecIdentity.self)
+            var certificate: SecCertificate?
+            guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
+                  let certificate else { continue }
+            if (SecCertificateCopyData(certificate) as Data) == der {
+                return identity
+            }
+        }
+        return nil
+    }
+
+    private static func installToKeychain(_ record: PairingRecord) throws {
         guard let certificate = SecCertificateCreateWithData(
             nil, record.hostCertificate as CFData
         ) else {
@@ -285,12 +325,32 @@ final class PairingStore {
             throw PairingError.noIdentity("私钥无法解析（需要 PKCS#1 DER）：\(reason)")
         }
 
-        guard let identity = sec_identity_create_with_certificates(
-            [certificate] as CFArray, key
-        ) else {
-            throw PairingError.noIdentity("证书与私钥匹配不上，无法组成 TLS 身份")
+        // 删除和添加要用两份查询：SecItemDelete 不接受带 kSecValueRef 的字典。
+        Self.wipeIdentity(label: record.keychainLabel)
+        let certQuery: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecValueRef as String: certificate,
+            kSecAttrLabel as String: record.keychainLabel
+        ]
+        let certStatus = SecItemAdd(certQuery as CFDictionary, nil)
+        guard certStatus == errSecSuccess || certStatus == errSecDuplicateItem else {
+            throw PairingError.noIdentity("证书写入 keychain 失败（\(certStatus)）")
         }
-        return identity
+
+        // 不要再写 kSecAttrKeyType / kSecAttrKeyClass：SecKey 自己带着这些属性，
+        // 重复指定会让 SecItemAdd 返回 errSecParam。kSecAttrIsPermanent 必须给，
+        // 否则用 kSecValueRef 添加的私钥不会真正落进 keychain，也就凑不出 identity。
+        let keyQuery: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecValueRef as String: key,
+            kSecAttrLabel as String: record.keychainLabel,
+            kSecAttrApplicationTag as String: Data(record.keychainLabel.utf8),
+            kSecAttrIsPermanent as String: true
+        ]
+        let keyStatus = SecItemAdd(keyQuery as CFDictionary, nil)
+        guard keyStatus == errSecSuccess || keyStatus == errSecDuplicateItem else {
+            throw PairingError.noIdentity("私钥写入 keychain 失败（\(keyStatus)）")
+        }
     }
 
     static func wipeIdentity(label: String) {
