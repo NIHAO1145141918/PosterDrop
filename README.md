@@ -12,10 +12,9 @@
 - 自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
 - 自带缓存清理，本 App / PosterBoard / 其他 App / 系统四级范围，容器内覆盖 8 类位置
 
-**[下载最新版（v1.0）](https://github.com/NIHAO1145141918/PosterDrop/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
+**[下载最新版（v1.0）](https://github.com/NuGe1145/JingJie/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
 
-> **1.4.1**：修复 1.4.0 的容器索引误判——没有 `container-manager` 权限时，`container_query` 只返回自己却不报错，
-> 导致深扫后「其他 App」整组消失。现改为剔除自身后少于 3 条即判定为沙盒限制并回落。详见 [Releases](https://github.com/NIHAO1145141918/PosterDrop/releases/tag/v1.4.1)。
+> **1.0**：首个正式版。修掉 iOS 26/27 上「父目录扩展必得 -6」导致的死路、csstore 改为倒序定位、分段扫描中断后可续、文件导入改用副本模式（`.plist` 不再被置灰）。完整说明见 [Releases](https://github.com/NuGe1145/JingJie/releases/tag/v1.0)。
 
 > 仅供安全研究与个人设备定制使用，请只在你自己拥有或获授权管理的设备上运行。
 
