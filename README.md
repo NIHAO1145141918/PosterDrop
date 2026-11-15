@@ -1,8 +1,8 @@
 # 净界（PosterDrop）
 
-首个正式版 **1.0**。App 显示名、图标已更新，Bundle ID 保持 `com.posterdrop.app` 不变，可直接覆盖安装。
+当前版本 **1.1**。Bundle ID 保持 `com.posterdrop.app` 不变，可直接覆盖安装。
 
-把 **PosterBoard 动态壁纸包（`.tendies`）** 导入 iPhone / iPad，直接装进系统，**免越狱、免电脑、免 VPN**。
+把 **PosterBoard 动态壁纸包（`.tendies`）** 导入 iPhone / iPad，直接装进系统，**免越狱、免电脑**。
 
 导入 → 注入 → respring，全程在设备上完成，一分钟内出结果。
 
@@ -12,9 +12,9 @@
 - 自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
 - 自带缓存清理，本 App / PosterBoard / 其他 App / 系统四级范围，容器内覆盖 8 类位置
 
-**[下载最新版（v1.0）](https://github.com/NuGe1145/JingJie/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
+**[下载最新版（v1.1）](https://github.com/NuGe1145/JingJie/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
 
-> **1.0**：首个正式版。修掉 iOS 26/27 上「父目录扩展必得 -6」导致的死路、csstore 改为倒序定位、分段扫描中断后可续、文件导入改用副本模式（`.plist` 不再被置灰）。完整说明见 [Releases](https://github.com/NuGe1145/JingJie/releases/tag/v1.0)。
+> **1.1**：清理页的「其他 App」显示真实名字，不再是容器 UUID；移除配对文件与 VPN 相关模块。详见 [Releases](https://github.com/NuGe1145/JingJie/releases/tag/v1.1)。
 
 > 仅供安全研究与个人设备定制使用，请只在你自己拥有或获授权管理的设备上运行。
 
@@ -113,7 +113,6 @@
 | --- | --- |
 | 自检通道 | 检查签名里的 App Groups、申请沙箱扩展、定位 PosterBoard 容器，全流程带阶段计时 |
 | 容器路径 | 自动定位，也支持手动粘贴 WQFiles 里复制的路径 |
-| VPN 检测 | 端口拨号判断是否真的能通，区分「有 utun 网卡」和「隧道可用」 |
 | 结构版本 | 切换 59 / 61 两套描述符结构，应对不同系统布局 |
 | 运行日志 | 每一步的签发、写入、校验结果都在 App 内可见，可复制 |
 
@@ -222,13 +221,11 @@ PosterBoard 把每张壁纸存成一组描述符目录：
 
 ## 五、常见问题
 
-**Q：为什么不需要 VPN？**
-A：核心通道是 worse_query，靠 App Group 容器 `Library/Caches` 的符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成，不开 VPN 也能量。
+**Q：需要电脑或者越狱吗？**
+A：都不需要。核心通道是 worse_query，靠 App Group 容器 `Library/Caches` 的符号链接让 containermanagerd 签出目标目录的扩展，全程在本机进程内完成。
 
-**Q：诊断页里的「配对文件」是干什么的？**
-A：可选。导入一份和本机配过对的 pairing 记录后，App 可以走 RSD 调 installation_proxy，**一次拿到全部 App 的容器路径（1–2 秒）**，跳过整卷 inode 扫描（约 250 秒）。不导入也能用，只是清理时第一次要走扫描。
-
-它和 VPN 的关系：VPN 只负责「让 App 连得上本机 RSD 端口」，不产生任何速度；快的是 installation_proxy 这条查询通道。如果配对握手能直接连局域网地址，连 VPN 都不需要。
+**Q：「其他 App」里的名字是怎么来的？**
+A：拿不到 containermanagerd 的索引，所以从容器内部反推 bundle id：扩展属性 → 容器元数据 → `Library/Preferences/<bundleID>.plist` → 缓存子目录 → 快照目录。拿到 id 再查内置名称表。五级全落空的显示「未识别的 App」，副标题给短 ID 用来区分。
 
 **Q：iOS 26 之前能用吗？支持 19–25 吗？**
 A：不能。iOS 18 之后 Apple 直接跳到 iOS 26，没有 19–25 这些版本号；而这条签发缺陷只存在于 26.0 及以后。
@@ -278,7 +275,7 @@ PosterDrop/
     │   ├── PosterBoardInstaller.swift # 注入 + 缓存刷新
     │   ├── CacheCleaner.swift     # 缓存清理（白名单 + 分组统计）
     │   ├── FileTree.swift         # 目录遍历内核：fd 相对 + getattrlistbulk
-    │   ├── VPNStatus.swift        # VPN 三态检测
+    │   ├── AppNames.swift         # 容器 UUID → bundle id → 真实 App 名
     │   ├── WallpaperStore.swift   # 本地库与索引
     │   ├── Respring.swift         # NeoSpring
     │   └── LogBus.swift
