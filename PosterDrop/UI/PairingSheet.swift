@@ -84,9 +84,15 @@ struct PairingSheet: View {
             Label("这是什么", systemImage: "key.horizontal")
                 .font(.subheadline.weight(.semibold))
 
-            Text("配对文件是设备给「可信主机」的凭证。有它，App 才能通过 RSD 调用 installation_proxy，一次拿到所有 App 的容器路径——1 秒，而不是扫 1.2 亿个 inode 的 250 秒。")
+            Text("配对文件是设备给「可信主机」的凭证。原本指望它通过 RSD 直接向系统要容器列表，省掉 1.2 亿个 inode 的扫描。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // 不能再用「1 秒代替 250 秒」这种话：iOS 17 之后这条路对普通签名 App 是关的。
+            Text("iOS 17 起 RSD 改成 Ed25519 密钥 + TLS-PSK 隧道，普通签名的 App 建不起这条隧道（需要 NetworkExtension 权限和用户态 TCP/IP 栈）。所以这条通道**基本走不通**，本页保留只用于确认文件格式。")
+                .font(.footnote)
+                .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
 
             Divider()

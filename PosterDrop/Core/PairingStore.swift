@@ -210,6 +210,18 @@ final class PairingStore {
         // 证书必须是能解析的 DER，否则后面 SecCertificateCreateWithData 会静默返回 nil，
         // 报错会跑到 TLS 那一步，很难定位。
         guard SecCertificateCreateWithData(nil, certificateBlob as CFData) != nil else {
+            // 最常见的误判来源：iOS 17 之后的 RSD 配对记录。它的 public_key 是
+            // 32 字节的 Ed25519 公钥，不是 X.509 证书，天然过不了这一关。
+            // 单独识别出来，比丢一句「不是有效的 DER」有用得多。
+            if isRSDPairingRecord(found, certificateBlob) {
+                throw PairingError.badFile(
+                    """
+                    这是 iOS 17+ 的 RSD 配对记录（Ed25519 公钥 \(certificateBlob.count) 字节 + alt_irk），不是 lockdown 的 RSA 记录。
+
+                    两者的用途完全不同：RSA 记录能直接当 TLS 客户端证书；Ed25519 记录只是 RSD 隧道的预共享密钥。iOS 不允许普通 App 建立这条隧道（需要 NetworkExtension 权限 + 用户态 TCP/IP 栈），所以这份文件在本 App 里用不了，换别的 App 也一样——除非它带平台权限。
+                    """
+                )
+            }
             throw PairingError.badFile(
                 "HostCertificate 不是有效的 DER 证书（\(certificateBlob.count) 字节，开头 \(preview(certificateBlob))）"
             )
@@ -239,6 +251,19 @@ final class PairingStore {
     }
 
     // MARK: - 解析辅助
+
+    /// iOS 17+ 的 RSD 配对记录：Ed25519 密钥对 + alt_irk，没有 X.509 证书。
+    private static func isRSDPairingRecord(_ found: [Found], _ blob: Data) -> Bool {
+        guard blob.count <= 64 else { return false }
+        if bestValue(in: found, keys: ["alt_irk", "altirk"], excluding: []) != nil {
+            return true
+        }
+        if let value = bestValue(in: found, keys: ["private_key", "privatekey"], excluding: []),
+           let data = value as? Data, data.count <= 64 {
+            return true
+        }
+        return false
+    }
 
     private struct Found {
         let key: String
