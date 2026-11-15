@@ -28,6 +28,35 @@ enum AppNames {
 
     // MARK: - 反查
 
+    /// 容器里以 bundle id 命名的位置。顺序按「命中率 × 可信度」排：
+    /// `HTTPStorages` 只有联网 App 才有、且名字就是 bundle id，几乎不会误判；
+    /// 偏好设置覆盖面最广，但目录里常混着系统写入的 `com.apple.*`。
+    private struct Source {
+        let tag: String
+        let relative: String
+        /// 条目名要剥掉的后缀，比如偏好设置是 `<bundleID>.plist`。
+        var suffixes: [String] = []
+        /// 条目名形如 `<bundleID>-<UUID>`，取横线前的部分。
+        var stripsUUID: Bool = false
+
+        static let all: [Source] = [
+            Source(tag: "http", relative: "Library/HTTPStorages"),
+            Source(tag: "webkit", relative: "Library/WebKit"),
+            Source(tag: "prefs", relative: "Library/Preferences", suffixes: [".plist"]),
+            Source(tag: "saved", relative: "Library/Saved Application State", suffixes: [".savedState"]),
+            Source(tag: "cookie", relative: "Library/Cookies", suffixes: [".binarycookies"]),
+            Source(tag: "support", relative: "Library/Application Support"),
+            Source(tag: "caches", relative: "Library/Caches"),
+            Source(tag: "snapshot", relative: "Library/SplashBoard/Snapshots", stripsUUID: true)
+        ]
+    }
+
+    private enum Lookup {
+        case hit(String)
+        case empty
+        case unreadable(Int32)
+    }
+
     /// 从容器根目录的 fd 猜 bundle id。取不到返回 nil。
     ///
     /// 全部用 containerFD 做起点，不拼全路径：既省一次前缀解析，
@@ -54,46 +83,105 @@ enum AppNames {
             }
         }
 
-        // ③ 偏好设置文件名。排除 .GlobalPreferences 这类系统文件。
-        if let hit = firstBundleID(in: containerFD, relative: "Library/Preferences", suffixes: [".plist"]) {
-            remember(container: containerName, bundleID: hit)
-            return hit
+        // ③ 逐级查目录。失败原因攒起来，识别不出来时留给诊断页。
+        var trace: [String] = []
+        for source in Source.all {
+            switch lookup(source, in: containerFD) {
+            case .hit(let identifier):
+                remember(container: containerName, bundleID: identifier)
+                return identifier
+            case .empty:
+                trace.append("\(source.tag)=空")
+            case .unreadable(let code):
+                trace.append("\(source.tag)=拒\(code)")
+            }
         }
 
-        // ④ 窗口状态存档：`Library/Saved Application State/com.xingin.xhs.savedState`。
-        //    这目录只有 App 真的被系统挂起过才存在，但在常用 App 上比偏好设置还全。
-        if let hit = firstBundleID(
-            in: containerFD,
-            relative: "Library/Saved Application State",
-            suffixes: [".savedState"]
-        ) {
-            remember(container: containerName, bundleID: hit)
-            return hit
-        }
-
-        // ⑤ Cookie 文件：`Library/Cookies/com.tencent.xin.binarycookies`。
-        if let hit = firstBundleID(
-            in: containerFD,
-            relative: "Library/Cookies",
-            suffixes: [".binarycookies"]
-        ) {
-            remember(container: containerName, bundleID: hit)
-            return hit
-        }
-
-        // ⑥ 缓存子目录。`Library/Caches/com.tencent.xin` 这种很常见。
-        if let hit = firstBundleID(in: containerFD, relative: "Library/Caches", suffixes: []) {
-            remember(container: containerName, bundleID: hit)
-            return hit
-        }
-
-        // ⑦ 快照目录，名字形如 `com.xingin.xhs-<UUID>`。
-        if let hit = snapshotBundleID(containerFD) {
-            remember(container: containerName, bundleID: hit)
-            return hit
-        }
-
+        noteFailure(containerName, trace: trace)
         return nil
+    }
+
+    // MARK: - 单级查找
+
+    private static func lookup(_ source: Source, in containerFD: Int32) -> Lookup {
+        // 不用 FileTree.openSubdirectory：它内部会先碰一次 rlimit 初始化，
+        // 那一行可能改掉 errno，诊断里就会把 EPERM 写成别的码。
+        let fd = source.relative.withCString {
+            openat(containerFD, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard fd >= 0 else { return .unreadable(errno) }
+        defer { close(fd) }
+
+        let iterator = dup(fd)
+        guard iterator >= 0, let directory = fdopendir(iterator) else {
+            if iterator >= 0 { close(iterator) }
+            return .unreadable(errno)
+        }
+        defer { closedir(directory) }
+
+        var names: [String] = []
+        while let entry = readdir(directory) {
+            var name = FileTree.entryName(entry)
+            if name.isEmpty || name == "." || name == ".." { continue }
+
+            for suffix in source.suffixes where name.hasSuffix(suffix) {
+                name = String(name.dropLast(suffix.count))
+            }
+            if source.stripsUUID {
+                guard let stripped = stripTrailingUUID(name) else { continue }
+                name = stripped
+            }
+            if looksLikeBundleID(name) { names.append(name) }
+        }
+
+        guard !names.isEmpty, let best = pick(from: names) else { return .empty }
+        return .hit(best)
+    }
+
+    /// 同级多个候选时的取舍。
+    ///
+    /// 第三方优先：`Library/Preferences` 里常有系统代写的 `com.apple.*.plist`，
+    /// 直接取最短的那个会张冠李戴。只有整级没有第三方条目时，才接受
+    /// `com.apple.*`——而且必须在内置名称表里，否则 `com.apple.security` 之类
+    /// 的公共前缀会被当成 App 名。
+    private static func pick(from names: [String]) -> String? {
+        let thirdParty = names.filter { !$0.lowercased().hasPrefix("com.apple.") }
+        // 表里认识的直接锁定，避免容器的 SDK 缓存目录（`com.foo.sdk` 这种更短的名字）抢位
+        if let known = thirdParty.first(where: { table[$0.lowercased()] != nil }) { return known }
+        if let best = thirdParty.min(by: { $0.count < $1.count }) { return best }
+        return names.first { table[$0.lowercased()] != nil }
+    }
+
+    /// `<bundleID>-<36 位 UUID>` → `<bundleID>`。不像就别用。
+    private static func stripTrailingUUID(_ name: String) -> String? {
+        guard name.count > 38 else { return nil }
+        let tail = name.suffix(37)
+        guard tail.first == "-" else { return nil }
+        let uuid = tail.dropFirst()
+        guard uuid.count == 36, uuid.filter({ $0 == "-" }).count == 4 else { return nil }
+        return String(name.dropLast(37))
+    }
+
+    // MARK: - 失败诊断
+
+    private static let failureLock = NSLock()
+    private static var failures: [String] = []
+
+    private static func noteFailure(_ container: String, trace: [String]) {
+        let short = String(container.prefix(8))
+        let line = "\(short)：\(trace.joined(separator: " "))"
+        failureLock.lock()
+        if failures.count < 5 { failures.append(line) }
+        failureLock.unlock()
+    }
+
+    /// 取出失败样本（取完即清），由调用方一次性写进日志。
+    static func drainFailureSamples() -> [String] {
+        failureLock.lock()
+        defer { failureLock.unlock() }
+        let result = failures
+        failures.removeAll()
+        return result
     }
 
     // MARK: - 显示名
@@ -141,73 +229,6 @@ enum AppNames {
         UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
     }
 
-    // MARK: - 目录扫描
-
-    /// 在 `relative` 目录里找第一个像 bundle id 的条目。
-    /// `suffixes` 非空时先去掉后缀再判断（偏好设置是 `<bundleID>.plist`）。
-    private static func firstBundleID(
-        in containerFD: Int32,
-        relative: String,
-        suffixes: [String]
-    ) -> String? {
-        guard let fd = FileTree.openSubdirectory(containerFD, relative) else { return nil }
-        defer { close(fd) }
-
-        var best: String?
-        let iterator = dup(fd)
-        guard iterator >= 0, let directory = fdopendir(iterator) else {
-            if iterator >= 0 { close(iterator) }
-            return nil
-        }
-        defer { closedir(directory) }
-
-        while let entry = readdir(directory) {
-            var name = FileTree.entryName(entry)
-            if name == "." || name == ".." { continue }
-            for suffix in suffixes where name.hasSuffix(suffix) {
-                name = String(name.dropLast(suffix.count))
-            }
-            guard looksLikeBundleID(name) else { continue }
-            // 同一目录可能有多份（比如 App 自己的 + 扩展的），取最短的那个，
-            // 它通常是主 App；扩展的 bundle id 更长。
-            if let current = best {
-                if name.count < current.count { best = name }
-            } else {
-                best = name
-            }
-        }
-        return best
-    }
-
-    /// `Library/SplashBoard/Snapshots` 里的条目叫 `com.xingin.xhs-<UUID>`。
-    private static func snapshotBundleID(_ containerFD: Int32) -> String? {
-        guard let fd = FileTree.openSubdirectory(
-            containerFD, "Library/SplashBoard/Snapshots"
-        ) else { return nil }
-        defer { close(fd) }
-
-        let iterator = dup(fd)
-        guard iterator >= 0, let directory = fdopendir(iterator) else {
-            if iterator >= 0 { close(iterator) }
-            return nil
-        }
-        defer { closedir(directory) }
-
-        while let entry = readdir(directory) {
-            let raw = FileTree.entryName(entry)
-            guard !raw.isEmpty, raw != ".", raw != ".." else { continue }
-            // 去掉尾部 `-<UUID>`（36 字符）
-            let candidate: String
-            if raw.count > 38, raw[raw.index(raw.endIndex, offsetBy: -37)] == "-" {
-                candidate = String(raw.dropLast(37))
-            } else {
-                continue
-            }
-            if looksLikeBundleID(candidate) { return candidate }
-        }
-        return nil
-    }
-
     // MARK: - 判定
 
     /// 反向域名的粗判。
@@ -216,7 +237,7 @@ enum AppNames {
     /// 只要「至少两段、首段是常见顶级域、字符集干净」就能挡掉绝大多数噪音。
     static func looksLikeBundleID(_ name: String) -> Bool {
         guard name.count >= 6, name.count <= 155 else { return false }
-        guard !name.hasPrefix("."), !name.hasPrefix("com.apple.") else { return false }
+        guard !name.hasPrefix(".") else { return false }
         guard name.contains("."), !name.contains("..") else { return false }
 
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-_")

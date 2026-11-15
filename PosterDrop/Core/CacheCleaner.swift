@@ -316,6 +316,11 @@ final class CacheCleaner: @unchecked Sendable {
             if !others.isEmpty {
                 log("App 名识别：\(named)/\(others.count) 个容器认出了名字，其余显示短 ID")
             }
+            // 认不出来的把失败原因列出来：http=拒1 表示目录能开但读不了，
+            // http=空 表示目录里没有反向域名条目，两种要改的方向完全不同。
+            for sample in AppNames.drainFailureSamples() {
+                log("  · \(sample)")
+            }
             measured.append(contentsOf: others)
         }
 
