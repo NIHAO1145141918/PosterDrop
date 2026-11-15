@@ -1,6 +1,6 @@
 # 净界（PosterDrop）
 
-当前版本 **1.1.4**。Bundle ID 保持 `com.posterdrop.app` 不变，可直接覆盖安装。
+当前版本 **1.1**。Bundle ID 保持 `com.posterdrop.app` 不变，可直接覆盖安装。
 
 把 **PosterBoard 动态壁纸包（`.tendies`）** 导入 iPhone / iPad，直接装进系统，**免越狱、免电脑**。
 
@@ -12,15 +12,9 @@
 - 自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
 - 自带缓存清理，本 App / PosterBoard / 其他 App / 系统四级范围，容器内覆盖 8 类位置
 
-**[下载最新版（v1.1.4）](https://github.com/NuGe1145/JingJie/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
+**[下载最新版（v1.1）](https://github.com/NuGe1145/JingJie/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
 
-> **1.1.4**：csstore 改按定长记录解析（记录头带 size，字段是按偏移取的字符串引用），照 WQFiles 的排布表逐版本试，一次拿到 `UUID → bundle id` 全表。详见 [Releases](https://github.com/NuGe1145/JingJie/releases/tag/v1.1.4)。
->
-> **1.1.3**：容器元数据改读不带前导点的那份（`com.apple.mobile_container_manager.metadata.plist`）——带点的是 0600，第三方读必被拒，1.1.2 就是卡在这里。详见 [Releases](https://github.com/NuGe1145/JingJie/releases/tag/v1.1.3)。
->
-> **1.1.2**：App 名识别补上 csstore 配对，识别不到的容器把 `Library` 实际内容写进日志，errno 改成可读文字。
->
-> **1.1**：清理页的「其他 App」显示真实名字，不再是容器 UUID；移除配对文件与 VPN 相关模块。
+> **1.1**：清理页的「其他 App」显示真实名字，不再是容器 UUID。App 名识别走四级：容器扩展属性 → 容器元数据（读不带前导点那份，带点的是 0600）→ csstore 定长记录解析（照 WQFiles 的排布表，含 24C5037i 实测确认的 0x25c / +0x0c / +0x6c）→ 容器内部残留文件反推。移除配对文件与 VPN 相关模块。详见 [Releases](https://github.com/NuGe1145/JingJie/releases/tag/v1.1)。
 
 > 仅供安全研究与个人设备定制使用，请只在你自己拥有或获授权管理的设备上运行。
 
