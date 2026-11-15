@@ -75,6 +75,7 @@ struct LibraryView: View {
             }
             .sheet(isPresented: $showImporter) {
                 DocumentPicker(
+                    allowsFolders: true,
                     onPick: { urls in
                         showImporter = false
                         guard !urls.isEmpty else { return }

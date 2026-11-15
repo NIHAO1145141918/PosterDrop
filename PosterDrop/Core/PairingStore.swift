@@ -172,10 +172,16 @@ final class PairingStore {
         collect(in: dictionary, context: [], depth: 0, into: &found, budget: &budget)
 
         let certificateKeys: Set<String> = [
-            "hostcertificate", "hostcert", "hostcertificatedata", "hostcertificatechain"
+            // lockdown / idevicepair
+            "hostcertificate", "hostcert", "hostcertificatedata", "hostcertificatechain",
+            // SideStore / jitterbugpair 的 rp_pairing_file.plist（snake_case）
+            "public_key", "publickey",
+            // 兜底：只有叫 certificate / cert 的字段
+            "certificate", "cert"
         ]
         let keyKeys: Set<String> = [
-            "hostprivatekey", "hostkey", "hostprivatekeydata", "privatekey"
+            "hostprivatekey", "hostkey", "hostprivatekeydata",
+            "private_key", "privatekey"
         ]
         let excludes = ["root", "device", "escrow"]
 
@@ -198,8 +204,8 @@ final class PairingStore {
             return text(from: value) ?? ""
         }
 
-        let hostID = string(["hostid", "hostidentifier"])
-        let systemBUID = string(["systembuid", "systembuidstring"])
+        let hostID = string(["hostid", "hostidentifier", "identifier", "host_id"])
+        let systemBUID = string(["systembuid", "systembuidstring", "system_buid"])
 
         // 证书必须是能解析的 DER，否则后面 SecCertificateCreateWithData 会静默返回 nil，
         // 报错会跑到 TLS 那一步，很难定位。
@@ -209,9 +215,12 @@ final class PairingStore {
             )
         }
 
-        let altIRK = string(["altirk", "hostaltirk"])
-        if !altIRK.isEmpty {
-            PairingStore.shared.storedAltIRK = altIRK
+        // alt_irk 在 SideStore 的格式里是 Data，lockdown 里是字符串，两种都收。
+        let altIRKKeys: Set<String> = ["altirk", "alt_irk", "hostaltirk"]
+        if let value = bestValue(in: found, keys: altIRKKeys, excluding: []),
+           let irk = text(from: value) ?? (value as? Data)?.base64EncodedString(),
+           !irk.isEmpty {
+            PairingStore.shared.storedAltIRK = irk
         }
 
         return PairingRecord(

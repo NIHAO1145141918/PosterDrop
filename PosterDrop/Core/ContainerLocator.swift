@@ -667,6 +667,26 @@ enum ContainerLocator {
             return
         }
 
+        // ①.5 按 object id 倒序定位到文件本身，再签发它所在的容器。
+        //
+        // 这一步是 WQFiles 能读到 csstore 的真正原因：目录不可读没关系，object id
+        // 是全局的，`fsgetpath` 只按 id 反查路径，不需要先有目录权限。拿到路径后
+        // 对容器根签一次扩展，文件就能读了——用的还是我们本来就会的那套签发。
+        if let storePath = LaunchServicesStore.locateStore(log: log) {
+            let caches = (storePath as NSString).deletingLastPathComponent
+            let container = (caches as NSString).deletingLastPathComponent
+            log("   csstore：定位到 \(storePath)，签发容器 \(container)")
+            if (try? SandboxEscape.grant(path: container, group: group)) != nil {
+                if let hit = LaunchServicesStore.harvest(file: storePath, log: log) {
+                    storeLaunchServices(hit, log: log)
+                    return
+                }
+                log("   csstore：签发成功但读不到文件")
+            } else {
+                log("   csstore：容器签不出来（-6），回落到 inode 反查")
+            }
+        }
+
         // ② 走 lsd 容器。class 10 是 InternalDaemon，3105 查的就是这个。
         guard let daemon = queryByIdentifier(bundleID: "com.apple.lsd", classes: [10, 12]) else {
             csstoreLock.lock(); csstoreTried = true; csstoreLock.unlock()

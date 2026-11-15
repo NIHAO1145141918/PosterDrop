@@ -22,15 +22,27 @@ struct DocumentPicker: UIViewControllerRepresentable {
 
     /// 配对文件一次只要一个，壁纸可以多选。
     var allowsMultipleSelection: Bool = true
+    /// 是否允许选文件夹。配对文件用不到，而 `.folder` 会让选择器进入
+    /// 文件夹浏览模式，iOS 27 上首屏要多等几秒才显示列表。
+    var allowsFolders: Bool = false
+    /// 是否把选中文件复制到临时目录。
+    ///
+    /// 配对文件走 false：iCloud /「文件」里的条目在 asCopy 模式下要先整份下载，
+    /// 大文件和弱网时就是几秒白屏。`PairingStore.adopt` 自己会开安全作用域，
+    /// 不需要系统代劳复制。
+    var copiesFiles: Bool = true
     var onPick: ([URL]) -> Void
     var onCancel: () -> Void = {}
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // public.data 覆盖所有普通文件；public.folder 让“打开文件夹”可用。
-        // 不要用 .item：抽象根类型在文件选择器里会被当成空过滤器。
+        // public.data 覆盖所有普通文件；不要用 .item——抽象根类型在文件选择器里
+        // 会被当成空过滤器，连 .ipa 都点不了。
+        var types: [UTType] = [.data]
+        if allowsFolders { types.append(.folder) }
+
         let picker = UIDocumentPickerViewController(
-            forOpeningContentTypes: [.data, .folder],
-            asCopy: true
+            forOpeningContentTypes: types,
+            asCopy: copiesFiles
         )
         picker.allowsMultipleSelection = allowsMultipleSelection
         picker.shouldShowFileExtensions = true

@@ -23,6 +23,7 @@ struct PairingSheet: View {
     @State private var report: RemoteProbeReport?
     @State private var message: String?
     @State private var logs: [String] = []
+    @State private var localFiles: [PairingCandidate] = []
 
     var body: some View {
         NavigationStack {
@@ -55,7 +56,11 @@ struct PairingSheet: View {
                 }
             }
             .sheet(isPresented: $showingPicker) {
-                DocumentPicker(allowsMultipleSelection: false) { urls in
+                DocumentPicker(
+                    allowsMultipleSelection: false,
+                    allowsFolders: false,
+                    copiesFiles: false
+                ) { urls in
                     showingPicker = false
                     guard let url = urls.first else { return }
                     importPairing(url)
@@ -64,6 +69,7 @@ struct PairingSheet: View {
                 }
                 .ignoresSafeArea()
             }
+            .onAppear { refreshState() }
         }
     }
 
@@ -141,10 +147,47 @@ struct PairingSheet: View {
 
     private var actionCard: some View {
         VStack(spacing: 10) {
+            // App 自己的文件夹里已经有配对文件时直接列出来：点一下就走完，
+            // 不用等系统选择器把 iCloud 目录列出来。
+            if !localFiles.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("App 文件夹里的配对文件")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(localFiles) { file in
+                        Button {
+                            importPairing(file.url)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.badge.key")
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(file.url.lastPathComponent)
+                                        .font(.footnote)
+                                        .lineLimit(1)
+                                    Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "arrow.down.circle")
+                                    .foregroundStyle(.tint)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            }
+
             Button {
                 showingPicker = true
             } label: {
-                Label("导入配对文件", systemImage: "square.and.arrow.down")
+                Label(localFiles.isEmpty ? "导入配对文件" : "从其他位置导入", systemImage: "square.and.arrow.down")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -257,6 +300,7 @@ struct PairingSheet: View {
     private func refreshState() {
         hasPairing = PairingStore.shared.hasPairing
         summary = PairingStore.shared.summary
+        localFiles = PairingStore.shared.discoveredPairingFiles()
     }
 
     private func runProbe() {

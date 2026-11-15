@@ -96,6 +96,11 @@ enum LaunchServicesStore {
     private static let searchChunk: Int64 = 32_768
     private static let inodeMargin: Int64 = 100_000
 
+    /// 定位结果留一份：`harvest` 和「签发后重读」会各调一次 `locateStore`，
+    /// 缓存住就不用扫两遍。
+    private static var cachedStorePath: String?
+    private static let cacheLock = NSLock()
+
     /// 卷标识 + 「比任何已存在 id 都大」的上界。
     ///
     /// 上界不用猜：在自己的目录里建个临时文件，它的 inode 就是当前卷的最大 id，
@@ -134,6 +139,13 @@ enum LaunchServicesStore {
     /// 只做纯文件读，全程不签发扩展：调用发生在清理流程内部，此时批处理的交换
     /// 链接已经生效，再签一次会把链接 retarget 掉（见 `listDirectory` 的注释）。
     static func locateStore(log: (String) -> Void) -> String? {
+        cacheLock.lock()
+        let cached = cachedStorePath
+        cacheLock.unlock()
+        if let cached, FileManager.default.fileExists(atPath: cached) {
+            return cached
+        }
+
         guard let probe = volumeProbe() else {
             log("   csstore 定位：拿不到卷上界")
             return nil
@@ -184,6 +196,7 @@ enum LaunchServicesStore {
 
                     let path = String(cString: buffer)
                     lock.lock()
+                    scanned += last - inode          // 命中那一格也算扫过
                     if found == nil { found = path }
                     next = chunks
                     lock.unlock()
@@ -204,6 +217,9 @@ enum LaunchServicesStore {
         if let hit {
             let seconds = Date().timeIntervalSince(started)
             log(String(format: "   csstore 定位：倒序扫 %.1f 秒、%lld 个 id 后命中", seconds, total))
+            cacheLock.lock()
+            cachedStorePath = hit
+            cacheLock.unlock()
             return hit
         }
         log("   csstore 定位：倒序扫 \(total) 个 id 未命中（限时 \(Int(searchLimit)) 秒）")
