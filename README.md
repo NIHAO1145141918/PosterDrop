@@ -1,4 +1,6 @@
-# PosterDrop
+# 净界（PosterDrop）
+
+首个正式版 **1.0**。App 显示名、图标已更新，Bundle ID 保持 `com.posterdrop.app` 不变，可直接覆盖安装。
 
 把 **PosterBoard 动态壁纸包（`.tendies`）** 导入 iPhone / iPad，直接装进系统，**免越狱、免电脑、免 VPN**。
 
@@ -10,7 +12,7 @@
 - 自动识别 Collections / Mercury / Photos / Kaleidoscope / Unity 五类壁纸
 - 自带缓存清理，本 App / PosterBoard / 其他 App / 系统四级范围，容器内覆盖 8 类位置
 
-**[下载最新版（v1.4.1）](https://github.com/NIHAO1145141918/PosterDrop/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
+**[下载最新版（v1.0）](https://github.com/NIHAO1145141918/PosterDrop/releases/latest)** · 未签名 IPA，侧载时需勾选 App Groups（`group.com.posterdrop.shared`）
 
 > **1.4.1**：修复 1.4.0 的容器索引误判——没有 `container-manager` 权限时，`container_query` 只返回自己却不报错，
 > 导致深扫后「其他 App」整组消失。现改为剔除自身后少于 3 条即判定为沙盒限制并回落。详见 [Releases](https://github.com/NIHAO1145141918/PosterDrop/releases/tag/v1.4.1)。
